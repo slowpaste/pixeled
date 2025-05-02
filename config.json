@@ -1,0 +1,8 @@
+[
+    {"module": "TransitIncidentsModule", "position": 0, "api_key": "70e9f89a4eed4f9e8c3ad995cf28a9be"},
+    {"module": "CpuUsageModule", "height": 4},
+    {"module": "RamUsageModule", "height": 1},
+    {"module": "ClockModule", "position": 22},
+    {"module": "BatteryModule", "position": 18, "height": 1},
+    {"module": "PrecomputedNoise", "height": 5, "position": 13}
+]
