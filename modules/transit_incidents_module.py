@@ -7,10 +7,16 @@ import threading
 import socket
 
 class TransitIncidentsModule(ModuleBase):
-    def __init__(self, api_key):
+    def __init__(self, api_key, scroll_speed=6.0):
         self.api_key = api_key
         self.height = 5
-        self.offset = 0
+        # Scroll rate in pixels per SECOND, not per frame. The panel runs at
+        # ~5.9fps in greyscale but ~50fps in black/white, so the old per-frame
+        # step scrolled ~8x faster in one mode than the other. 6.0 reproduces
+        # the greyscale cadence `offset += 1` used to give.
+        self.scroll_speed = scroll_speed
+        self.offset = 0.0
+        self._last_render = None
         self.incidents = ["Initializing..."]
         self.current_incident_index = 0
         self.check_connectivity_and_fetch()
@@ -88,13 +94,22 @@ class TransitIncidentsModule(ModuleBase):
         if self.incidents:
             text = self.incidents[self.current_incident_index].upper()  # Ensure text is uppercase
             text_width = len(text) * 4  # Calculate text width properly
-            x = width - (self.offset % (text_width + width))
+            # The font draws on whole pixels, so the accumulator carries the
+            # fraction and only the draw position is floored.
+            x = width - int(self.offset % (text_width + width))
             draw_tiny_text(image, text, x, 0)
-            self.offset += 1
+
+            # Elapsed wall time since the last frame. Clamped so a stall
+            # (startup, config reload, mode switch) can't jump the text a long
+            # way, which would otherwise skip whole incidents.
+            now = time.monotonic()
+            dt = 0.0 if self._last_render is None else min(now - self._last_render, 0.25)
+            self._last_render = now
+            self.offset += self.scroll_speed * dt
 
             # If the text has completely scrolled past, move to the next incident
             if self.offset >= (text_width + width):
-                self.offset = 0
+                self.offset = 0.0
                 self.current_incident_index = (self.current_incident_index + 1) % len(self.incidents)
 
         return image

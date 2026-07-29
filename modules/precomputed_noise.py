@@ -1,22 +1,31 @@
+import time
+
 import numpy as np
 from PIL import Image, ImageEnhance
 from modules.module_base import ModuleBase
 from perlin_noise import PerlinNoise
 
 class PrecomputedNoise(ModuleBase):
-    def __init__(self, height):
+    def __init__(self, height, scroll_speed=2.0):
         super().__init__(height)
         self.width = 9
         self.high_res_width = self.width * 32  # Making the noise image 6 times wider than the display width
         self.high_res_height = self.height * 2
         self.noise = PerlinNoise(octaves=5, seed=42)
         self.noise_image = self.generate_cylindrical_noise_texture(self.high_res_width, self.high_res_height, scale=1.5)
+        # Scroll rate in display pixels per SECOND, not per frame. The panel runs
+        # at ~5.9fps in greyscale but ~50fps in black/white, so a per-frame step
+        # would scroll ~8x faster in one mode than the other. Sub-pixel offsets
+        # blend between adjacent texture columns, so slow motion still reads as
+        # continuous rather than stepping a whole pixel at a time.
+        self.scroll_speed = scroll_speed
         self.velocity = 0.0
         self.target_velocity = 0.0
         self.brightness_factor = 1.0
         self.target_brightness_factor = 1.0
-        self.acceleration = 0.2
-        self.brightness_change_rate = 0.1
+        self.acceleration = scroll_speed * 1.2   # ramp to full speed in ~0.85s
+        self.brightness_change_rate = 0.6        # per second
+        self._last_render = None
         self.status = "Not charging"
         self.offset = 0
 
@@ -69,50 +78,59 @@ class PrecomputedNoise(ModuleBase):
         with open('/sys/class/power_supply/BAT1/status', 'r') as f:
             return f.read().strip()
 
-    def update_velocity_and_brightness(self):
+    def update_velocity_and_brightness(self, dt):
+        accel = self.acceleration * dt
         if self.velocity < self.target_velocity:
-            self.velocity = min(self.velocity + self.acceleration, self.target_velocity)
+            self.velocity = min(self.velocity + accel, self.target_velocity)
         elif self.velocity > self.target_velocity:
-            self.velocity = max(self.velocity - self.acceleration, self.target_velocity)
+            self.velocity = max(self.velocity - accel, self.target_velocity)
 
+        rate = self.brightness_change_rate * dt
         if self.brightness_factor < self.target_brightness_factor:
-            self.brightness_factor = min(self.brightness_factor + self.brightness_change_rate, self.target_brightness_factor)
+            self.brightness_factor = min(self.brightness_factor + rate, self.target_brightness_factor)
         elif self.brightness_factor > self.target_brightness_factor:
-            self.brightness_factor = max(self.brightness_factor - self.brightness_change_rate, self.target_brightness_factor)
+            self.brightness_factor = max(self.brightness_factor - rate, self.target_brightness_factor)
 
     def render(self, width):
         self.status = self.get_battery_status()
 
         # Update target velocity and brightness based on status
         if self.status == "Charging":
-            self.target_velocity = 1  # Scroll left
+            self.target_velocity = self.scroll_speed  # Scroll left
             self.target_brightness_factor = 1.0  # Full brightness
         elif self.status == "Discharging":
-            self.target_velocity = -1  # Scroll right
+            self.target_velocity = -self.scroll_speed  # Scroll right
             self.target_brightness_factor = 0.5  # Half brightness
         else:  # Not charging
             self.target_velocity = 0.0  # Stop scrolling
             self.target_brightness_factor = 0.5  # Half brightness
 
+        # Elapsed wall time since the last frame. Clamped so a stall (startup,
+        # config reload, mode switch) can't jump the scroll a long way.
+        now = time.monotonic()
+        dt = 0.0 if self._last_render is None else min(now - self._last_render, 0.25)
+        self._last_render = now
+
         # Update current velocity and brightness factor
-        self.update_velocity_and_brightness()
+        self.update_velocity_and_brightness(dt)
 
         # Calculate new offset
-        self.offset += self.velocity
+        self.offset += self.velocity * dt
         self.offset %= self.high_res_width  # Ensure the offset wraps around correctly
 
-        # Create combined noise image with higher resolution
+        # Sample the texture at the fractional offset, blending the two adjacent
+        # integer slices. This is what makes sub-pixel steps visible: the grey
+        # levels themselves carry the fraction of a pixel we've moved, so motion
+        # reads as continuous rather than stepping a whole pixel at a time.
+        # np.take(mode='wrap') also handles the cylindrical wrap for free.
         int_offset = int(self.offset)
-        noise_image = self.noise_image[:, int_offset:int_offset + self.width]
+        frac = self.offset - int_offset
+        columns = np.arange(int_offset, int_offset + self.width)
+        near = np.take(self.noise_image, columns, axis=1, mode='wrap').astype(np.float64)
+        far = np.take(self.noise_image, columns + 1, axis=1, mode='wrap').astype(np.float64)
+        blended = near * (1.0 - frac) + far * frac
 
-        # Handle wrapping around by concatenating the image
-        if int_offset + self.width > self.noise_image.shape[1]:
-            noise_image = np.concatenate((
-                self.noise_image[:, int_offset:],
-                self.noise_image[:, :int_offset + self.width - self.noise_image.shape[1]]
-            ), axis=1)
-
-        noise_image = Image.fromarray(noise_image)
+        noise_image = Image.fromarray(blended.astype(np.uint8))
         noise_image = self.adjust_brightness(noise_image, self.brightness_factor)
 
         # Downsample to display resolution

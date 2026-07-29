@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Switch the LED matrix between greyscale and black/white.
+#
+#   grey  - full greyscale, ~5.9fps (10 serial commands per frame)
+#   bw    - Bayer-dithered 1-bit, ~50fps (1 serial command per frame)
+#
+# The running service polls this file about once a second, so no restart and no
+# root are needed - /opt/pixeled is owned by the login user.
+set -euo pipefail
+
+MODE_FILE="${PIXELED_MODE_FILE:-/opt/pixeled/display_mode}"
+
+current() {
+  if [ -r "$MODE_FILE" ]; then
+    tr -d '[:space:]' < "$MODE_FILE"
+  else
+    echo grey
+  fi
+}
+
+case "${1:-toggle}" in
+  grey|gray|g) new=grey ;;
+  bw|mono|b)   new=bw ;;
+  toggle|t)
+    if [ "$(current)" = bw ]; then new=grey; else new=bw; fi
+    ;;
+  status|s)
+    echo "$(current)"
+    exit 0
+    ;;
+  *)
+    echo "usage: ${0##*/} [toggle|grey|bw|status]" >&2
+    exit 1
+    ;;
+esac
+
+printf '%s\n' "$new" > "$MODE_FILE"
+echo "display mode: $new (applies within 1s)"
