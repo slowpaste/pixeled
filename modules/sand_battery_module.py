@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 import os
 import random
 import time
@@ -50,7 +51,8 @@ class SandBatteryModule(ModuleBase):
     PEAK_WRITE_INTERVAL = 60.0  # don't rewrite the peaks file more often
 
     def __init__(self, height=6, spread=1.1, fall_speed=11.0,
-                 roll_speed=9.0, float_speed=7.0, drift_speed=3.0,
+                 roll_speed=9.0, float_speed=7.0,
+                 sway_width=(0.7, 2.2), sway_rate=(6.0, 12.0), float_jitter=0.25,
                  repose=1, slump_rate=30.0,
                  floor_watts=45.0, max_density=0.9, peak_file=None):
         super().__init__(height)
@@ -64,7 +66,12 @@ class SandBatteryModule(ModuleBase):
         self.fall_speed = fall_speed
         self.roll_speed = roll_speed
         self.float_speed = float_speed
-        self.drift_speed = drift_speed
+        # Specks leaving the pile flutter rather than tracking a fixed diagonal.
+        # Width and rate are drawn per speck: a shared frequency reads as one
+        # rippling wave instead of as snow, and a shared phase even more so.
+        self.sway_width = tuple(sway_width)   # lanes, peak deviation
+        self.sway_rate = tuple(sway_rate)     # radians/sec
+        self.float_jitter = float_jitter      # +/- share of outward speed
         # Full scale is the hardest this machine has been seen to push, tracked
         # per direction: a charge peaks well below a full-load discharge, so
         # sharing one scale would leave charging permanently unable to reach
@@ -231,8 +238,9 @@ class SandBatteryModule(ModuleBase):
         mean_height = sum(self.heights) / float(self.lanes)
         reach = (self.lanes / 2.0 + 0.5)   # middle lanes to a side edge
         if status == 'Discharging':
-            outward = (self.depth + 1 - mean_height) / self.float_speed
-            return max(min(outward, reach / self.drift_speed), 0.05)
+            # Fluttering specks leave only by drifting out past the outer edge;
+            # sway is purely lateral, so it does not shorten their stay.
+            return max((self.depth + 1 - mean_height) / self.float_speed, 0.05)
         # Charging: fall to the surface, then roll off the side as surplus.
         fall = (self.depth + 0.5 - mean_height) / self.fall_speed
         return max(fall + reach / self.roll_speed, 0.05)
@@ -371,10 +379,23 @@ class SandBatteryModule(ModuleBase):
         self.falling.append({'lane': lane, 'pos': float(self.depth) + 0.5})
 
     def _lift(self, lane):
-        """Peel a speck off the surface of a lane and let it float away."""
-        self.floating.append({'lane': float(lane),
-                              'pos': float(self.heights[lane]),
-                              'dir': self._side_dir(lane)})
+        """Peel a speck off the surface of a lane and let it flutter away."""
+        self.floating.append({
+            'lane': float(lane),      # the lane it left; sway is around this
+            'pos': float(self.heights[lane]),
+            'sway': random.uniform(*self.sway_width),
+            'rate': random.uniform(*self.sway_rate),
+            'phase': random.uniform(0.0, 2.0 * math.pi),
+            'speed': self.float_speed * random.uniform(1.0 - self.float_jitter,
+                                                       1.0 + self.float_jitter),
+            'age': 0.0,
+        })
+
+    @staticmethod
+    def _sway_lane(speck):
+        """Where a fluttering speck is across the lanes, right now."""
+        return speck['lane'] + speck['sway'] * math.sin(
+            speck['phase'] + speck['rate'] * speck['age'])
 
     # ── simulation ───────────────────────────────────────────────────────────
     def _advance(self, dt, target):
@@ -400,11 +421,12 @@ class SandBatteryModule(ModuleBase):
                         if -0.5 <= s['lane'] <= self.lanes - 0.5]
 
         for speck in self.floating:
-            speck['pos'] += self.float_speed * dt
-            speck['lane'] += speck['dir'] * self.drift_speed * dt
-        self.floating = [s for s in self.floating
-                         if s['pos'] <= self.depth + 1
-                         and -0.5 <= s['lane'] <= self.lanes - 0.5]
+            speck['age'] += dt
+            speck['pos'] += speck['speed'] * dt
+        # Culled only on the way out. A speck whose sway carries it past a side
+        # edge is merely not drawn for those frames - dropping it there would
+        # delete specks that were about to swing back into view.
+        self.floating = [s for s in self.floating if s['pos'] <= self.depth + 1]
 
     def _emit(self, dt, status, target):
         """Spawn this frame's specks.
@@ -504,7 +526,7 @@ class SandBatteryModule(ModuleBase):
             if 0 <= lane < self.lanes:
                 grid[lane, min(self.heights[lane], width - 1)] = 255
         for speck in self.floating:
-            lane = int(round(speck['lane']))
+            lane = int(round(self._sway_lane(speck)))
             pos = int(speck['pos'])
             if 0 <= lane < self.lanes and 0 <= pos < width:
                 grid[lane, pos] = 255
