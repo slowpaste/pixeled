@@ -38,6 +38,13 @@ class Compositor:
             for module, _, _ in self.modules:
                 self._tell_mode(module)
 
+    def set_scroll_speed(self, px_per_second):
+        """Push a runtime scroll speed to every module that accepts one."""
+        for module, _, _ in self.modules:
+            setter = getattr(module, 'set_scroll_speed', None)
+            if callable(setter):
+                setter(px_per_second)
+
     def active_modules(self):
         """Modules that apply to the current mode.
 

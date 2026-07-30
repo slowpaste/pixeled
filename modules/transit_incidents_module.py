@@ -7,16 +7,21 @@ import threading
 import socket
 
 class TransitIncidentsModule(ModuleBase):
-    def __init__(self, api_key, scroll_speed=32.0, frame_step_modes=('grey',)):
+    def __init__(self, api_key, scroll_speed=24.0, frame_step_modes=('grey',)):
         self.api_key = api_key
         self.height = 5
         # Two different rules, because the modes are ~8x apart in frame rate:
         #
         #   grey (~5.9fps)  one pixel per refresh, which is as smooth as 6fps
         #                   can be - anything faster has to skip pixels.
-        #   bw   (~50fps)   scroll_speed pixels per SECOND. At 32 px/s that is
-        #                   0.64 px per frame, so a step lands every ~31ms and
-        #                   the quantising is invisible.
+        #   bw   (~50fps)   scroll_speed pixels per SECOND.
+        #
+        # The bw figure is a judgement call about real LEDs, not about the
+        # maths: text that reads fine simulated on a monitor smears on the
+        # panel, because the LEDs and the eye both hold a lit pixel longer than
+        # a browser does. It is settable at runtime by the pixeled-speed script
+        # for exactly that reason - the readable ceiling has to be found on the
+        # hardware.
         self.scroll_speed = scroll_speed
         self.frame_step_modes = tuple(frame_step_modes)
         self.mode = None
@@ -101,6 +106,14 @@ class TransitIncidentsModule(ModuleBase):
             # nothing. Otherwise leaving greyscale would carry its 169ms frame
             # period into the fast mode and lurch the text ~5px on every toggle.
             self._last_render = None
+
+    def set_scroll_speed(self, px_per_second):
+        """Retune the per-second scroll rate while running.
+
+        Only affects modes that scroll by time; a per-refresh mode is pinned to
+        one pixel a frame by definition.
+        """
+        self.scroll_speed = float(px_per_second)
 
     def _advance(self):
         """Pixels to move this frame.

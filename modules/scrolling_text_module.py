@@ -5,11 +5,12 @@ from PIL import Image
 from utils.tiny_font import draw_tiny_text
 
 class ScrollingTextModule(ModuleBase):
-    def __init__(self, height, scroll_speed=32.0, frame_step_modes=('grey',)):
+    def __init__(self, height, scroll_speed=24.0, frame_step_modes=('grey',)):
         super().__init__(height)
         # Per-refresh in greyscale (~5.9fps, so one pixel a frame is as smooth
-        # as it gets), pixels per second in black/white (~50fps, where 32 px/s
-        # is 0.64 px a frame and the quantising is invisible).
+        # as it gets), pixels per second in black/white. Runtime-settable via
+        # the pixeled-speed script, because how fast text can go before it
+        # smears is a property of the LEDs, not something to derive.
         self.scroll_speed = scroll_speed
         self.frame_step_modes = tuple(frame_step_modes)
         self.mode = None
@@ -20,6 +21,10 @@ class ScrollingTextModule(ModuleBase):
         if mode != self.mode:
             self.mode = mode
             self._last_render = None   # first frame in the new mode moves nothing
+
+    def set_scroll_speed(self, px_per_second):
+        """Retune the per-second scroll rate while running."""
+        self.scroll_speed = float(px_per_second)
 
     def _advance(self):
         """Pixels to move this frame. The clock is read either way, so leaving

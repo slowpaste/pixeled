@@ -52,6 +52,8 @@ config_changed = False
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODE_FILE = os.path.join(BASE_DIR, 'display_mode')
+SCROLL_FILE = os.path.join(BASE_DIR, 'scroll_speed')
+SCROLL_MIN, SCROLL_MAX = 1.0, 120.0
 
 logging.basicConfig(filename=os.path.join(BASE_DIR, 'service.log'), level=logging.INFO,
                    format='%(asctime)s %(message)s')
@@ -245,6 +247,22 @@ def read_mode(fallback=MODE_GREY):
         return fallback
     return value if value in MODE_FPS else fallback
 
+def read_scroll_speed(fallback=None):
+    """Read the text scroll speed written by the pixeled-speed script.
+
+    Returns fallback when the file is absent or unusable, so a missing or
+    half-written file leaves whatever config.json asked for in place rather
+    than snapping the ticker to some default.
+    """
+    try:
+        with open(SCROLL_FILE, 'r') as f:
+            value = float(f.read().strip())
+    except (OSError, ValueError):
+        return fallback
+    if not SCROLL_MIN <= value <= SCROLL_MAX:
+        return fallback
+    return value
+
 def load_config(config_file):
     with open(config_file, 'r') as f:
         return json.load(f)
@@ -307,6 +325,12 @@ def main():
     compositor = load_modules(config, width, height, mode)
     panel = Panel()
 
+    # A runtime override, if one has been set; otherwise config.json wins.
+    scroll_speed = read_scroll_speed()
+    if scroll_speed is not None:
+        compositor.set_scroll_speed(scroll_speed)
+        logging.info(f"Scroll speed: {scroll_speed:.1f} px/s")
+
     # Start OutGauge reader if BeamNG is running at startup
     if is_beamng_running():
         if not outgauge_reader._thread or not outgauge_reader._thread.is_alive():
@@ -329,12 +353,23 @@ def main():
                     compositor.set_mode(mode)
                     logging.info(f"Display mode -> {mode} ({MODE_FPS[mode]:.0f}fps target)")
 
+                # Pick up scroll speed changes from the pixeled-speed script
+                new_speed = read_scroll_speed(scroll_speed)
+                if new_speed != scroll_speed:
+                    scroll_speed = new_speed
+                    compositor.set_scroll_speed(scroll_speed)
+                    logging.info(f"Scroll speed -> {scroll_speed:.1f} px/s")
+
             # Check if configuration has changed
             if config_changed:
                 logging.info("Reloading configuration...")
                 try:
                     config = load_config(config_file)
                     compositor = load_modules(config, width, height, mode)
+                    if scroll_speed is not None:
+                        # Fresh modules start from config.json, so reapply the
+                        # runtime override or a reload would silently undo it.
+                        compositor.set_scroll_speed(scroll_speed)
                     config_changed = False
                     logging.info("Configuration reloaded successfully")
                 except Exception as e:

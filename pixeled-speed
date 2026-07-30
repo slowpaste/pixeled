@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# Set how fast the ticker text scrolls, in pixels per second.
+#
+# Only affects black/white mode. Greyscale advances exactly one pixel per
+# refresh (~5.9 px/s) and is deliberately not tunable - at 6fps that is already
+# the smoothest it can be, and anything faster would skip pixels.
+#
+# The running service polls this file about once a second, so no restart and no
+# root are needed - /opt/pixeled is owned by the login user.
+#
+#   pixeled-speed            show the current setting
+#   pixeled-speed 24         set 24 px/s
+#   pixeled-speed up         +2 px/s
+#   pixeled-speed down       -2 px/s
+#   pixeled-speed reset      hand control back to config.json
+set -euo pipefail
+
+SPEED_FILE="${PIXELED_SPEED_FILE:-/opt/pixeled/scroll_speed}"
+DEFAULT=24
+STEP=2
+MIN=1
+MAX=120
+
+current() {
+  if [ -r "$SPEED_FILE" ]; then
+    tr -d '[:space:]' < "$SPEED_FILE"
+  else
+    echo "$DEFAULT"
+  fi
+}
+
+# Clamp and normalise to one decimal place. Bash has no floats, so awk does it.
+clamp() {
+  awk -v v="$1" -v lo="$MIN" -v hi="$MAX" 'BEGIN{
+    if (v < lo) v = lo; if (v > hi) v = hi;
+    printf "%.1f\n", v
+  }'
+}
+
+is_number() {
+  awk -v v="$1" 'BEGIN{ exit (v ~ /^[0-9]+(\.[0-9]+)?$/) ? 0 : 1 }'
+}
+
+case "${1:-status}" in
+  status|s|"")
+    if [ -r "$SPEED_FILE" ]; then
+      echo "$(current) px/s"
+    else
+      echo "unset - using the value from config.json"
+    fi
+    exit 0
+    ;;
+  up|u|faster|+)
+    new=$(clamp "$(awk -v c="$(current)" -v s="$STEP" 'BEGIN{print c+s}')")
+    ;;
+  down|d|slower|-)
+    new=$(clamp "$(awk -v c="$(current)" -v s="$STEP" 'BEGIN{print c-s}')")
+    ;;
+  reset|default)
+    rm -f "$SPEED_FILE"
+    echo "scroll speed: unset (config.json takes over within 1s)"
+    exit 0
+    ;;
+  -h|--help|help)
+    sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
+    exit 0
+    ;;
+  *)
+    if ! is_number "$1"; then
+      echo "usage: ${0##*/} [status|up|down|reset|<px per second>]" >&2
+      exit 1
+    fi
+    new=$(clamp "$1")
+    ;;
+esac
+
+printf '%s\n' "$new" > "$SPEED_FILE"
+echo "scroll speed: $new px/s (applies within 1s, black/white mode only)"
