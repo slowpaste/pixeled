@@ -2,7 +2,7 @@
 # Switch the LED matrix between greyscale and black/white.
 #
 #   grey  - full greyscale, ~5.9fps (10 serial commands per frame)
-#   bw    - Bayer-dithered 1-bit, ~50fps (1 serial command per frame)
+#   bw    - 1-bit, ~50fps (1 serial command per frame)
 #
 # The running service polls this file about once a second, so no restart and no
 # root are needed - /opt/pixeled is owned by the login user.

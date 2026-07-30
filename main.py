@@ -34,10 +34,18 @@ MODE_POLL_INTERVAL = 1.0  # seconds between checks of the mode file
 
 BEAMNG_POLL_INTERVAL = 10  # seconds
 
-# Ordered 4x4 Bayer thresholds, tiled to the panel. Needed because a flat
-# threshold erases the noise band entirely - it sits well below mid-grey.
-_BAYER4 = np.array([[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]])
-BAYER_THRESHOLD = np.tile(_BAYER4, (HEIGHT // 4 + 1, WIDTH // 4 + 1))[:HEIGHT, :WIDTH] * (255.0 / 16.0)
+# Cutoff for the 1-bit path: a pixel lights if it is at least half lit.
+#
+# This was a 4x4 ordered Bayer matrix while black/white mode still drew the
+# PrecomputedNoise band, where a flat threshold really did erase a large area
+# of below-midpoint grey. Now that the band is greyscale-only, the only grey
+# left in this mode is the fractional pixel at the tip of a 1px-thick bar
+# gauge, and ordered dithering is actively wrong for an isolated pixel: it
+# samples one arbitrary cell of the matrix, so on row 11 the cutoff alternated
+# between 79.7 and 239.1 across x. The same fractional fill lit or didn't
+# purely by where the bar happened to end. Restore the dither if a module with
+# large mid-grey areas ever returns to this mode.
+BW_THRESHOLD = 128
 
 # Define global variables at the module level
 config_changed = False
@@ -174,13 +182,13 @@ class Panel:
 
     @staticmethod
     def _pack_bw(image):
-        """Dither to 1 bit and pack into the 39-byte DrawBW payload.
+        """Reduce to 1 bit and pack into the 39-byte DrawBW payload.
 
         Bit index is i = x + 9*y, stored at bit (i % 8) of byte (i // 8). A
         row-major flatten of the 34x9 array yields exactly that ordering, so
         packbits with little bit order does the whole thing in one pass.
         """
-        bits = np.asarray(image, dtype=np.float64) > BAYER_THRESHOLD
+        bits = np.asarray(image) >= BW_THRESHOLD
         return np.packbits(bits.reshape(-1), bitorder='little').tobytes()
 
     def draw(self, image, mode):
@@ -241,8 +249,8 @@ def load_config(config_file):
     with open(config_file, 'r') as f:
         return json.load(f)
 
-def load_modules(config, width, height):
-    compositor = Compositor(width, height, config)
+def load_modules(config, width, height, mode=None):
+    compositor = Compositor(width, height, config, mode=mode)
 
     # Add modules based on the configuration
     for mod in config:
@@ -271,8 +279,9 @@ def load_modules(config, width, height):
         if not hasattr(module_instance, 'height'):
             raise ValueError(f"Module {module_name} does not have a height attribute")
 
-        # Add the module to the compositor
-        compositor.add_module(module_instance, position)
+        # Add the module to the compositor. "modes" restricts a module to
+        # particular display modes; omitting it means "draw in all modes".
+        compositor.add_module(module_instance, position, mod.get("modes"))
 
     # Initialize layout once
     compositor.initialize_layout()
@@ -287,9 +296,15 @@ def main():
     # Start the BeamNG monitor thread
     monitor_thread = start_beamng_monitor()
 
+    # Read the mode before building the layout: it decides which modules are
+    # drawn, so the compositor needs it up front.
+    mode = read_mode()
+    period = 1.0 / MODE_FPS[mode]
+    logging.info(f"Display mode: {mode} ({MODE_FPS[mode]:.0f}fps target)")
+
     # Initial configuration load
     config = load_config(config_file)
-    compositor = load_modules(config, width, height)
+    compositor = load_modules(config, width, height, mode)
     panel = Panel()
 
     # Start OutGauge reader if BeamNG is running at startup
@@ -297,9 +312,6 @@ def main():
         if not outgauge_reader._thread or not outgauge_reader._thread.is_alive():
             outgauge_reader.start()
 
-    mode = read_mode()
-    period = 1.0 / MODE_FPS[mode]
-    logging.info(f"Display mode: {mode} ({MODE_FPS[mode]:.0f}fps target)")
     next_frame = time.monotonic()
     next_mode_check = next_frame
 
@@ -313,6 +325,8 @@ def main():
                     mode = new_mode
                     period = 1.0 / MODE_FPS[mode]
                     next_frame = time.monotonic()
+                    # Swaps in that mode's modules without rebuilding them.
+                    compositor.set_mode(mode)
                     logging.info(f"Display mode -> {mode} ({MODE_FPS[mode]:.0f}fps target)")
 
             # Check if configuration has changed
@@ -320,7 +334,7 @@ def main():
                 logging.info("Reloading configuration...")
                 try:
                     config = load_config(config_file)
-                    compositor = load_modules(config, width, height)
+                    compositor = load_modules(config, width, height, mode)
                     config_changed = False
                     logging.info("Configuration reloaded successfully")
                 except Exception as e:

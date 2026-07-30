@@ -3,6 +3,7 @@
     {"module": "CpuUsageModule", "height": 4},
     {"module": "RamUsageModule", "height": 1},
     {"module": "ClockModule", "position": 22},
-    {"module": "BatteryModule", "position": 18, "height": 1},
-    {"module": "PrecomputedNoise", "height": 5, "position": 13}
+    {"module": "BatteryModule", "position": 18, "height": 1, "modes": ["grey"]},
+    {"module": "PrecomputedNoise", "height": 5, "position": 13, "modes": ["grey"]},
+    {"module": "SandBatteryModule", "height": 6, "position": 13, "modes": ["bw"]}
 ]

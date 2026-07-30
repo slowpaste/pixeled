@@ -1,22 +1,43 @@
 from PIL import Image
 
 class Compositor:
-    def __init__(self, width, height, config):
+    def __init__(self, width, height, config, mode=None):
         self.width = width
         self.height = height
         self.modules = []
         self.config = config
+        self.mode = mode
         self.layout = None  # Store the layout after the initial placement
 
-    def add_module(self, module, position=None):
+    def add_module(self, module, position=None, modes=None):
         if not hasattr(module, 'height') or module.height is None:
             raise ValueError(f"Module {module.__class__.__name__} must have a valid height attribute")
-        self.modules.append((module, position))
+        self.modules.append((module, position, modes))
+
+    def set_mode(self, mode):
+        """Choose which display mode's layout to draw.
+
+        Modules are built once and kept, so switching modes only changes which
+        of them get laid out - rebuilding instead would restart the transit
+        module's fetch threads on every toggle.
+        """
+        if mode != self.mode:
+            self.mode = mode
+            self.layout = None  # force a relayout on the next render
+
+    def active_modules(self):
+        """Modules that apply to the current mode.
+
+        A module with no 'modes' list is drawn in every mode; otherwise it is
+        drawn only in the modes it names.
+        """
+        return [(module, position) for module, position, modes in self.modules
+                if not modes or self.mode is None or self.mode in modes]
 
     def calculate_layout(self):
         positions = {}
         unspecified_modules = []
-        for module, position in self.modules:
+        for module, position in self.active_modules():
             if position is not None:
                 positions[position] = module
             else:
