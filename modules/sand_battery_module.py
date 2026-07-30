@@ -33,10 +33,12 @@ class SandBatteryModule(ModuleBase):
     SYS = '/sys/class/power_supply/BAT1'
     IDLE_RATE = 8.0       # specks/sec used only to correct drift when idle
     MAX_DT = 0.25         # clamp, so a stall can't teleport the whole pile
+    NOMINAL_MICROVOLTS = 15_480_000   # 4S pack nominal, last-resort fallback
 
-    def __init__(self, height=6, spread=1.1, flow_rate=14.0, fall_speed=11.0,
+    def __init__(self, height=6, spread=1.1, fall_speed=11.0,
                  roll_speed=9.0, float_speed=7.0, drift_speed=3.0,
-                 repose=1, slump_rate=30.0):
+                 repose=1, slump_rate=30.0,
+                 full_watts=120.0, max_visible=14.0):
         super().__init__(height)
         self.lanes = height
         self.depth = None          # cells per lane; set on first render
@@ -49,7 +51,12 @@ class SandBatteryModule(ModuleBase):
         self.roll_speed = roll_speed
         self.float_speed = float_speed
         self.drift_speed = drift_speed
-        self.flow_rate = flow_rate
+        # Power that counts as a full-density stream. Default is roughly a
+        # Framework 16 discharging under full CPU + 7700S load at maximum
+        # brightness; charging peaks lower, so a charge reads proportionally
+        # calmer, which is honest - it really is moving less power.
+        self.full_watts = full_watts
+        self.max_visible = max_visible   # specks on screen at full_watts
         # Angle of repose, in cells of depth per lane. 1 is a 45 degree slope,
         # the steepest a falling-sand grain can hold when its only options are
         # straight down or diagonally down.
@@ -83,11 +90,54 @@ class SandBatteryModule(ModuleBase):
             return sum(self.heights)  # unreadable: hold the current pile
         return int(round(max(0, min(100, capacity)) / 100.0 * self.total))
 
-    def _stream_rate(self):
-        """Specks/sec to draw. Scaled by actual current so a fast charge
-        visibly pours harder than a trickle."""
+    def _power(self):
+        """Watts flowing in or out, from the battery's own current and voltage.
+
+        Power, not current: it is the quantity that actually varies with load,
+        and it stays comparable between charging and discharging even though
+        pack voltage differs between the two.
+        """
         amps = abs(self._read('current_now') or 0) / 1e6
-        return self.flow_rate * (0.4 + min(amps, 3.0) / 1.6)
+        # Fall back through nominal pack voltage rather than treating a missing
+        # reading as 0 V, which would silently mean "never draw any flow".
+        micro_volts = (self._read('voltage_now')
+                       or self._read('voltage_min_design')
+                       or self.NOMINAL_MICROVOLTS)
+        return amps * (micro_volts / 1e6)
+
+    def _speck_life(self, status):
+        """Roughly how long a speck stays on screen, in seconds.
+
+        Converts a wanted on-screen population into a spawn rate. Time on
+        screen depends on how deep the pile is, because a full pile is a short
+        fall, so without this the same wattage would look about 3x busier at
+        10% charge than at 100%.
+        """
+        mean_height = sum(self.heights) / float(self.lanes)
+        reach = (self.lanes / 2.0 + 0.5)   # middle lanes to a side edge
+        if status == 'Discharging':
+            outward = (self.depth + 1 - mean_height) / self.float_speed
+            return max(min(outward, reach / self.drift_speed), 0.05)
+        # Charging: fall to the surface, then roll off the side as surplus.
+        fall = (self.depth + 0.5 - mean_height) / self.fall_speed
+        return max(fall + reach / self.roll_speed, 0.05)
+
+    def _stream_rate(self, status):
+        """Specks/sec, chosen so the number visible at once is proportional to
+        the power actually flowing.
+
+        Straight proportion through the origin, which is all this needs: power
+        already spans about three orders of magnitude between a fraction of a
+        watt and a fully loaded CPU plus dGPU, so a linear map separates idle
+        at minimum brightness from full load by more than 20x on its own. Zero
+        draws nothing at all, and a tiny trickle draws one speck every few tens
+        of seconds. A compressive curve like sqrt would wreck both ends - it
+        turns a trickle into a stream and flattens idle-vs-full to about 5x.
+        """
+        visible = self.max_visible * self._power() / self.full_watts
+        # Guard only against a nonsense sysfs reading, not against real load.
+        visible = min(visible, self.max_visible * 2.0)
+        return visible / self._speck_life(status)
 
     # ── pile mechanics ───────────────────────────────────────────────────────
     @property
@@ -240,11 +290,13 @@ class SandBatteryModule(ModuleBase):
         no matter what the status says.
         """
         flowing = status in ('Charging', 'Discharging')
-        if flowing:
-            rate = self._stream_rate()
-        elif sum(self.heights) != target:
-            rate = self.IDLE_RATE   # idle, but the reading drifted from the pile
-        else:
+        rate = self._stream_rate(status) if flowing else 0.0
+        if sum(self.heights) != target:
+            # The pile must reach the reading even when nothing is flowing, so
+            # convergence gets a floor. At rest and already correct, the rate
+            # stays exactly zero and nothing is drawn at all.
+            rate = max(rate, self.IDLE_RATE)
+        if rate <= 0.0:
             return
 
         self._credit += rate * dt
