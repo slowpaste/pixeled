@@ -1,3 +1,6 @@
+import json
+import logging
+import os
 import random
 import time
 
@@ -5,6 +8,9 @@ import numpy as np
 from PIL import Image
 
 from modules.module_base import ModuleBase
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEFAULT_PEAK_FILE = os.path.join(BASE_DIR, 'power_peaks.json')
 
 
 class SandBatteryModule(ModuleBase):
@@ -35,10 +41,18 @@ class SandBatteryModule(ModuleBase):
     MAX_DT = 0.25         # clamp, so a stall can't teleport the whole pile
     NOMINAL_MICROVOLTS = 15_480_000   # 4S pack nominal, last-resort fallback
 
+    # Full scale is learned from what this machine has actually drawn, so the
+    # brightest snow means "as hard as you have ever pushed it" rather than a
+    # number guessed off a spec sheet.
+    FEASIBLE_WATTS = 200.0    # beyond this it is a bad reading, not a real load
+    SAMPLE_INTERVAL = 0.5     # seconds between battery reads
+    PEAK_CONFIRM = 3          # samples a candidate peak must hold for (~1.5s)
+    PEAK_WRITE_INTERVAL = 60.0  # don't rewrite the peaks file more often
+
     def __init__(self, height=6, spread=1.1, fall_speed=11.0,
                  roll_speed=9.0, float_speed=7.0, drift_speed=3.0,
                  repose=1, slump_rate=30.0,
-                 full_watts=120.0, max_visible=14.0):
+                 floor_watts=45.0, max_density=0.9, peak_file=None):
         super().__init__(height)
         self.lanes = height
         self.depth = None          # cells per lane; set on first render
@@ -51,12 +65,31 @@ class SandBatteryModule(ModuleBase):
         self.roll_speed = roll_speed
         self.float_speed = float_speed
         self.drift_speed = drift_speed
-        # Power that counts as a full-density stream. Default is roughly a
-        # Framework 16 discharging under full CPU + 7700S load at maximum
-        # brightness; charging peaks lower, so a charge reads proportionally
-        # calmer, which is honest - it really is moving less power.
-        self.full_watts = full_watts
-        self.max_visible = max_visible   # specks on screen at full_watts
+        # Full scale is the hardest this machine has been seen to push, tracked
+        # per direction: a charge peaks well below a full-load discharge, so
+        # sharing one scale would leave charging permanently unable to reach
+        # full snow. floor_watts stops a history of nothing but idling from
+        # rescaling a 5W trickle into a blizzard.
+        self.floor_watts = floor_watts
+        # Fraction of the *empty* cells carrying specks at full scale. Below 1
+        # on purpose: the pile's edge has to stay findable through the snow.
+        self.max_density = max_density
+        self.peak_file = DEFAULT_PEAK_FILE if peak_file is None else peak_file
+        self.peaks = {'charge': 0.0, 'discharge': 0.0}
+        self._load_peaks()
+        self._streak = 0            # consecutive samples above the stored peak
+        self._streak_key = None
+        self._streak_floor = 0.0
+        self._peaks_written = None
+
+        # Cached battery state. Sampled on a cadence rather than every frame:
+        # reading sysfs 200x/sec costs little here (measured 0.7% of a core),
+        # but confirming a peak over 3 samples only rejects spikes if those
+        # samples span a meaningful stretch of time.
+        self._sampled_at = None
+        self._status = 'Unknown'
+        self._capacity = None
+        self._watts = 0.0
         # Angle of repose, in cells of depth per lane. 1 is a 45 degree slope,
         # the steepest a falling-sand grain can hold when its only options are
         # straight down or diagonally down.
@@ -83,12 +116,94 @@ class SandBatteryModule(ModuleBase):
         except (OSError, ValueError):
             return None
 
+    def _load_peaks(self):
+        """Recover learned full scale from disk. Absent or corrupt is fine:
+        the peaks just relearn from the floor."""
+        try:
+            with open(self.peak_file, 'r') as f:
+                stored = json.load(f)
+        except (OSError, ValueError):
+            return
+        for key in self.peaks:
+            try:
+                value = float(stored.get(key, 0.0))
+            except (TypeError, ValueError):
+                continue
+            if 0.0 <= value <= self.FEASIBLE_WATTS:
+                self.peaks[key] = value
+
+    def _save_peaks(self):
+        """Persist the peaks, rate-limited, written whole then renamed.
+
+        A torn file would be read back as corrupt and silently reset the scale,
+        so it is never written in place.
+        """
+        now = time.monotonic()
+        if (self._peaks_written is not None
+                and now - self._peaks_written < self.PEAK_WRITE_INTERVAL):
+            return
+        self._peaks_written = now
+        tmp = f'{self.peak_file}.tmp'
+        try:
+            with open(tmp, 'w') as f:
+                json.dump({k: round(v, 2) for k, v in self.peaks.items()}, f)
+            os.replace(tmp, self.peak_file)
+        except OSError as e:
+            logging.error(f"Could not save power peaks: {e}")
+
+    def _observe(self, status, watts):
+        """Ratchet the learned peak, ignoring spikes and impossible readings.
+
+        A candidate has to hold above the stored peak for PEAK_CONFIRM samples
+        before it counts, and it is adopted at the *lowest* value across that
+        run rather than the highest, so one bad sample in an otherwise sane
+        stretch can only ever understate the peak.
+        """
+        key = {'Charging': 'charge', 'Discharging': 'discharge'}.get(status)
+        if key is None or not 0.0 < watts <= self.FEASIBLE_WATTS:
+            self._streak = 0          # implausible, or nothing is flowing
+            return
+        if watts <= self.peaks[key]:
+            self._streak = 0          # nothing new to learn
+            return
+        if key != self._streak_key or self._streak == 0:
+            # Starting a fresh run: the floor must start from this sample, not
+            # carry over from the last run, or every later peak would be pinned
+            # to the first one ever learned.
+            self._streak_key, self._streak_floor = key, watts
+        self._streak += 1
+        self._streak_floor = min(self._streak_floor, watts)
+        if self._streak >= self.PEAK_CONFIRM:
+            previous = self.peaks[key]
+            self.peaks[key] = self._streak_floor
+            self._streak = 0
+            logging.info(f"Power peak ({key}) {previous:.1f} -> "
+                         f"{self.peaks[key]:.1f} W")
+            self._save_peaks()
+
+    def _sample(self):
+        """Refresh cached battery state on SAMPLE_INTERVAL."""
+        now = time.monotonic()
+        if (self._sampled_at is not None
+                and 0.0 <= now - self._sampled_at < self.SAMPLE_INTERVAL):
+            return
+        self._sampled_at = now
+        self._status = self._read('status', str) or 'Unknown'
+        self._capacity = self._read('capacity')
+        self._watts = self._power()
+        self._observe(self._status, self._watts)
+
+    def _reference(self, status):
+        """Watts that count as full scale for this direction."""
+        key = {'Charging': 'charge', 'Discharging': 'discharge'}.get(status)
+        learned = self.peaks.get(key, 0.0) if key else 0.0
+        return max(learned, self.floor_watts)
+
     def _target(self):
         """Number of specks that should be settled, 0..54."""
-        capacity = self._read('capacity')
-        if capacity is None:
+        if self._capacity is None:
             return sum(self.heights)  # unreadable: hold the current pile
-        return int(round(max(0, min(100, capacity)) / 100.0 * self.total))
+        return int(round(max(0, min(100, self._capacity)) / 100.0 * self.total))
 
     def _power(self):
         """Watts flowing in or out, from the battery's own current and voltage.
@@ -124,7 +239,7 @@ class SandBatteryModule(ModuleBase):
 
     def _stream_rate(self, status):
         """Specks/sec, chosen so the number visible at once is proportional to
-        the power actually flowing.
+        the power flowing, against a full scale this machine taught us.
 
         Straight proportion through the origin, which is all this needs: power
         already spans about three orders of magnitude between a fraction of a
@@ -133,10 +248,19 @@ class SandBatteryModule(ModuleBase):
         draws nothing at all, and a tiny trickle draws one speck every few tens
         of seconds. A compressive curve like sqrt would wreck both ends - it
         turns a trickle into a stream and flattens idle-vs-full to about 5x.
+
+        Density is a share of the *free* cells rather than an absolute count,
+        because the flow has to live in whatever the pile is not using. At full
+        scale that fills most of the empty space with moving specks - snow -
+        while an absolute count would either saturate at high charge or look
+        thin at low charge.
         """
-        visible = self.max_visible * self._power() / self.full_watts
-        # Guard only against a nonsense sysfs reading, not against real load.
-        visible = min(visible, self.max_visible * 2.0)
+        free = self.total - sum(self.heights)
+        if free <= 0:
+            return 0.0      # pile is full; there is nowhere to draw a speck
+        # At or beyond the learned peak it is full snow; it cannot get denser.
+        share = min(self._watts / self._reference(status), 1.0)
+        visible = self.max_density * free * share
         return visible / self._speck_life(status)
 
     # ── pile mechanics ───────────────────────────────────────────────────────
@@ -342,7 +466,8 @@ class SandBatteryModule(ModuleBase):
     def render(self, width):
         if self.depth is None:
             self.depth = width
-        status = self._read('status', str) or 'Unknown'
+        self._sample()
+        status = self._status
         target = self._target()
 
         if not self._primed:
