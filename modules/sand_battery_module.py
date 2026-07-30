@@ -19,6 +19,11 @@ class SandBatteryModule(ModuleBase):
     lane is 9 cells deep, and settled sand leaves no gaps, so a lane is fully
     described by how many grains have come to rest in it.
 
+    The lane distribution only chooses where a speck is *released*. Where it
+    ends up is decided by the sand: a grain rolls downhill on landing, and any
+    slope steeper than `repose` collapses over time, so the pile relaxes into a
+    rounded heap instead of standing up as a histogram of the drop weights.
+
     Flow is deliberately over-drawn: far more specks stream in or out than the
     net change in charge calls for, because the stream is what shows current
     direction and magnitude. Only the specks needed to match the battery
@@ -30,7 +35,8 @@ class SandBatteryModule(ModuleBase):
     MAX_DT = 0.25         # clamp, so a stall can't teleport the whole pile
 
     def __init__(self, height=6, spread=1.1, flow_rate=14.0, fall_speed=11.0,
-                 roll_speed=9.0, float_speed=7.0, drift_speed=3.0):
+                 roll_speed=9.0, float_speed=7.0, drift_speed=3.0,
+                 repose=1, slump_rate=30.0):
         super().__init__(height)
         self.lanes = height
         self.depth = None          # cells per lane; set on first render
@@ -44,14 +50,21 @@ class SandBatteryModule(ModuleBase):
         self.float_speed = float_speed
         self.drift_speed = drift_speed
         self.flow_rate = flow_rate
+        # Angle of repose, in cells of depth per lane. 1 is a 45 degree slope,
+        # the steepest a falling-sand grain can hold when its only options are
+        # straight down or diagonally down.
+        self.repose = repose
+        self.slump_rate = slump_rate   # grains/sec that avalanche
 
-        # Placement and removal are aggressively biased toward the middle
-        # lanes, so the pile builds a rounded heap rather than a flat wall.
+        # Where specks are *released* is biased hard toward the middle lanes,
+        # which is what keeps the heap centred; the pile shape itself comes
+        # from the sand settling, not from these weights.
         centre = (self.lanes - 1) / 2.0
         weights = np.exp(-(((np.arange(self.lanes) - centre) / spread) ** 2))
         self.lane_weights = weights / weights.sum()
 
         self._credit = 0.0         # fractional specks carried between frames
+        self._slump_credit = 0.0   # fractional avalanche steps carried over
         self._last_render = None
         self._primed = False
 
@@ -96,14 +109,30 @@ class SandBatteryModule(ModuleBase):
                 return lane
         return max(eligible)  # float rounding fell off the end
 
+    def _roll_downhill(self, lane):
+        """Follow the slope to a local low point.
+
+        A grain landing on a slope does not stay put: it slides to whichever
+        neighbour is lower, the same way a falling-sand grain goes diagonally
+        when the cell straight below is taken. Heights strictly decrease along
+        the walk, so it always terminates.
+        """
+        while True:
+            lower = [i for i in (lane - 1, lane + 1)
+                     if 0 <= i < self.lanes and self.heights[i] < self.heights[lane]]
+            if not lower:
+                return lane
+            lane = min(lower, key=lambda i: self.heights[i])
+
     def _settle(self, lane):
-        """Rest a speck on the pile, compacting if its lane is already full.
+        """Rest a speck on the pile, rolling downhill first.
 
         A speck that would come to rest past the outer edge has settled
         offscreen, so it gets pushed into whatever space is left rather than
         being lost. That is what guarantees 100% lights all 54 cells even
-        though the middle lanes fill first.
+        though the middle lanes take most of the drops.
         """
+        lane = self._roll_downhill(lane)
         if self.heights[lane] >= self.depth:
             spaces = [i for i in range(self.lanes) if self.heights[i] < self.depth]
             if not spaces:
@@ -112,6 +141,52 @@ class SandBatteryModule(ModuleBase):
             lane = min(spaces, key=lambda i: (self.heights[i], abs(i - lane)))
         self.heights[lane] += 1
         return True
+
+    def _unstable_edges(self):
+        """(drop, from, to) for every slope steeper than the angle of repose."""
+        edges = []
+        for lane in range(self.lanes):
+            for other in (lane - 1, lane + 1):
+                if 0 <= other < self.lanes:
+                    drop = self.heights[lane] - self.heights[other]
+                    if drop > self.repose:
+                        edges.append((drop, lane, other))
+        return edges
+
+    def _topple_once(self):
+        """Shed one grain off the steepest overhanging edge."""
+        edges = self._unstable_edges()
+        if not edges:
+            return False
+        steepest = max(edge[0] for edge in edges)
+        # Ties pick at random so cascades don't always run the same way.
+        _, lane, other = random.choice([e for e in edges if e[0] == steepest])
+        self.heights[lane] -= 1
+        self.heights[other] += 1
+        return True
+
+    def _avalanche(self, dt):
+        """Let steep edges collapse into shorter neighbours, a grain at a time.
+
+        This is what makes the pile behave like sand rather than a bar chart:
+        the drop weights decide where grains arrive, this decides where they
+        can stay. Rate-limited so a slump is visible as it runs, rather than
+        snapping to a stable profile within one frame.
+        """
+        self._slump_credit += self.slump_rate * dt
+        while self._slump_credit >= 1.0:
+            if not self._topple_once():
+                # Already stable - don't bank credit, or a long quiet spell
+                # would buy an instant avalanche the moment one appears.
+                self._slump_credit = 0.0
+                return
+            self._slump_credit -= 1.0
+
+    def _settle_fully(self):
+        """Relax to a stable profile immediately, for use before the first frame."""
+        for _ in range(self.total * self.lanes):
+            if not self._topple_once():
+                return
 
     def _side_dir(self, lane):
         """Which way a speck leaves: toward the nearer side edge."""
@@ -208,6 +283,7 @@ class SandBatteryModule(ModuleBase):
             lane = self._pick_lane(spaces)
             if lane is None or not self._settle(lane):
                 break
+        self._settle_fully()   # show a stable slope on the very first frame
         self._primed = True
 
     # ── render ───────────────────────────────────────────────────────────────
@@ -231,6 +307,9 @@ class SandBatteryModule(ModuleBase):
 
         self._advance(dt, target)
         self._emit(dt, status, target)
+        # Last, so any cliff this frame's arrivals or removals just created
+        # starts collapsing rather than standing until the next frame.
+        self._avalanche(dt)
 
         grid = np.zeros((self.height, width), dtype=np.uint8)
         for lane in range(self.lanes):
