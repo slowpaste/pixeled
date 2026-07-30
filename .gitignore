@@ -3,3 +3,6 @@ __pycache__/
 *.log
 *.pyc
 deploy.sh
+display_mode
+scroll_speed
+power_peaks.json
