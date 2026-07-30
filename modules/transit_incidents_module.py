@@ -7,14 +7,19 @@ import threading
 import socket
 
 class TransitIncidentsModule(ModuleBase):
-    def __init__(self, api_key, scroll_speed=6.0):
+    def __init__(self, api_key, scroll_speed=32.0, frame_step_modes=('grey',)):
         self.api_key = api_key
         self.height = 5
-        # Scroll rate in pixels per SECOND, not per frame. The panel runs at
-        # ~5.9fps in greyscale but ~50fps in black/white, so the old per-frame
-        # step scrolled ~8x faster in one mode than the other. 6.0 reproduces
-        # the greyscale cadence `offset += 1` used to give.
+        # Two different rules, because the modes are ~8x apart in frame rate:
+        #
+        #   grey (~5.9fps)  one pixel per refresh, which is as smooth as 6fps
+        #                   can be - anything faster has to skip pixels.
+        #   bw   (~50fps)   scroll_speed pixels per SECOND. At 32 px/s that is
+        #                   0.64 px per frame, so a step lands every ~31ms and
+        #                   the quantising is invisible.
         self.scroll_speed = scroll_speed
+        self.frame_step_modes = tuple(frame_step_modes)
+        self.mode = None
         self.offset = 0.0
         self._last_render = None
         self.incidents = ["Initializing..."]
@@ -89,6 +94,30 @@ class TransitIncidentsModule(ModuleBase):
         thread.daemon = True  # Daemonize thread to exit when the main program exits
         thread.start()
 
+    def set_mode(self, mode):
+        if mode != self.mode:
+            self.mode = mode
+            # Drop the timestamp so the first frame in the new mode moves
+            # nothing. Otherwise leaving greyscale would carry its 169ms frame
+            # period into the fast mode and lurch the text ~5px on every toggle.
+            self._last_render = None
+
+    def _advance(self):
+        """Pixels to move this frame.
+
+        The clock is read on every frame regardless of which rule applies, so
+        that switching out of a per-refresh mode doesn't see a stale timestamp
+        and jump the text the full clamp width.
+        """
+        now = time.monotonic()
+        last, self._last_render = self._last_render, now
+        if self.mode in self.frame_step_modes:
+            return 1.0   # exactly one pixel per refresh, by definition smooth
+        # Clamped so a stall (startup, config reload, mode switch) can't jump
+        # the text a long way, which would otherwise skip whole incidents.
+        dt = 0.0 if last is None else min(now - last, 0.25)
+        return self.scroll_speed * dt
+
     def render(self, width):
         image = super().render(width)
         if self.incidents:
@@ -99,13 +128,7 @@ class TransitIncidentsModule(ModuleBase):
             x = width - int(self.offset % (text_width + width))
             draw_tiny_text(image, text, x, 0)
 
-            # Elapsed wall time since the last frame. Clamped so a stall
-            # (startup, config reload, mode switch) can't jump the text a long
-            # way, which would otherwise skip whole incidents.
-            now = time.monotonic()
-            dt = 0.0 if self._last_render is None else min(now - self._last_render, 0.25)
-            self._last_render = now
-            self.offset += self.scroll_speed * dt
+            self.offset += self._advance()
 
             # If the text has completely scrolled past, move to the next incident
             if self.offset >= (text_width + width):

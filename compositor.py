@@ -13,6 +13,17 @@ class Compositor:
         if not hasattr(module, 'height') or module.height is None:
             raise ValueError(f"Module {module.__class__.__name__} must have a valid height attribute")
         self.modules.append((module, position, modes))
+        self._tell_mode(module)
+
+    def _tell_mode(self, module):
+        """Let a module adapt to the display mode, if it cares.
+
+        Frame rate differs by roughly 8x between modes, so a module animating
+        per refresh rather than per second needs to know which one is running.
+        """
+        setter = getattr(module, 'set_mode', None)
+        if callable(setter):
+            setter(self.mode)
 
     def set_mode(self, mode):
         """Choose which display mode's layout to draw.
@@ -24,6 +35,8 @@ class Compositor:
         if mode != self.mode:
             self.mode = mode
             self.layout = None  # force a relayout on the next render
+            for module, _, _ in self.modules:
+                self._tell_mode(module)
 
     def active_modules(self):
         """Modules that apply to the current mode.
