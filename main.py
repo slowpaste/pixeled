@@ -7,17 +7,16 @@ import json
 import importlib
 from compositor import Compositor
 from modules.artwork_overlay import ArtworkOverlay
+from modules.beamng_overlay import BeamngOverlay
 from modules.overview_overlay import OverviewOverlay
 from modules.plug_overlay import PlugOverlay
 from PIL import Image
 import re
 import inspect
 import logging
-import threading
 import os
 import shutil
 import signal
-from utils.udp_outgauge_utility import outgauge_reader
 from utils.sound_medium import SoundMedium
 from utils.plug_physics import Breach, Ripple
 from utils.sound_visualizer import sound_visualizer
@@ -55,7 +54,6 @@ BRIGHTNESS_POLL_INTERVAL = 0.1  # seconds; a slider being dragged shouldn't lag
 # both current and PWM, and the eye is not, so a linear slider would do all
 # its visible dimming in the bottom fifth of its travel.
 BRIGHTNESS_CURVE = 2.2
-BEAMNG_POLL_INTERVAL = 10  # seconds
 
 # Seconds a frame has to take before it is logged. Three frames' worth:
 # below that the panel's own pacing absorbs it, above it the picture
@@ -121,7 +119,6 @@ TUNED_DEFAULTS = {name: getattr(cls, name.split('.')[-1])
                   for name, (cls, _, _) in TUNABLE.items()}
 
 # Define global variables at the module level
-config_changed = False
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SCROLL_FILE = os.path.join(BASE_DIR, 'scroll_speed')
@@ -135,99 +132,37 @@ SCROLL_MIN, SCROLL_MAX = 1.0, 120.0
 logging.basicConfig(filename=os.path.join(BASE_DIR, 'service.log'), level=logging.INFO,
                    format='%(asctime)s %(message)s')
 
-def is_beamng_running():
-    """Check if BeamNG.drive is currently running.
-
-    Reads /proc/<pid>/comm directly rather than using psutil.process_iter(),
-    which costs ~17ms of GIL-held CPU per call here - enough to stall a frame
-    every time the monitor thread polls.
-    """
-    for pid in os.listdir('/proc'):
-        if not pid.isdigit():
-            continue
-        try:
-            with open(f"/proc/{pid}/comm", "rb") as f:
-                if b"BeamNG" in f.read():
-                    return True
-        except OSError:
-            pass  # process exited mid-scan, or not ours to read
-    return False
-
 def same_contents(a, b):
-    """Whether two files hold identical bytes. Missing or unreadable is False."""
     try:
         with open(a, 'rb') as fa, open(b, 'rb') as fb:
             return fa.read() == fb.read()
     except OSError:
         return False
 
-def swap_config(use_beamng_config):
-    """Swap between normal and BeamNG configs"""
+def unswap_config():
+    """Put the real layout back, if a previous version left the dashboard one
+    in config.json.
+
+    The dashboard used to be swapped in wholesale by a thread watching for the
+    process, with the layout it displaced kept in config.json.normal. It is an
+    overlay now, so the swap is gone - but a service killed mid-game, or simply
+    upgraded to this version while the game was running, still has config.json
+    holding the dashboard. Left alone that would be taken for the layout the
+    user chose and kept forever, so it is undone once, here, before anything
+    reads it.
+    """
+    if not same_contents(CONFIG_FILE, BEAMNG_CONFIG):
+        return
+    if not os.path.exists(NORMAL_CONFIG):
+        logging.warning("config.json holds the dashboard layout and there is no "
+                        "config.json.normal to put back")
+        return
     try:
-        if use_beamng_config:
-            # The backup is refreshed on every detection, not written once and
-            # kept forever. It used to be guarded on the file not existing,
-            # which froze it as a snapshot of whatever the layout was the first
-            # time BeamNG ever ran: every later quit restored that, silently
-            # reverting any module added to config.json since.
-            #
-            # The guard is on contents instead. If config.json is already the
-            # BeamNG layout - the service restarted mid-game, so the monitor
-            # sees a fresh detection - backing it up would overwrite the real
-            # layout with the dashboard and lose it for good.
-            if os.path.exists(CONFIG_FILE) and not same_contents(CONFIG_FILE, BEAMNG_CONFIG):
-                shutil.copy2(CONFIG_FILE, NORMAL_CONFIG)
-            shutil.copy2(BEAMNG_CONFIG, CONFIG_FILE)
-            logging.info("Switched to BeamNG configuration")
-            return True
-        else:
-            if os.path.exists(NORMAL_CONFIG):
-                shutil.copy2(NORMAL_CONFIG, CONFIG_FILE)
-                logging.info("Reverted to normal configuration")
-                return True
-    except Exception as e:
-        logging.error(f"Error swapping config: {e}")
-    return False
-
-def start_beamng_monitor():
-    def monitor_thread():
-        global config_changed  # Declare global at the beginning of the function
-        # Seeded from what config.json actually holds, not assumed False. The
-        # swaps are edge-triggered, so a process that starts believing BeamNG
-        # was never running will not revert a config.json left on the dashboard
-        # layout - which is what happens whenever the service restarts after
-        # BeamNG quit. Seeding it this way turns that stale config into a
-        # running -> not-running edge on the first poll, and it heals itself.
-        was_beamng_running = same_contents(CONFIG_FILE, BEAMNG_CONFIG)
-        while True:
-            try:
-                beamng_running = is_beamng_running()
-
-                # State change detection
-                if beamng_running and not was_beamng_running:
-                    logging.info("BeamNG detected! Switching configuration...")
-                    if swap_config(True):
-                        # Signal main thread to reload
-                        config_changed = True
-                        # Ensure OutGauge reader is running
-                        if not outgauge_reader._thread or not outgauge_reader._thread.is_alive():
-                            outgauge_reader.start()
-
-                elif not beamng_running and was_beamng_running:
-                    logging.info("BeamNG closed. Reverting configuration...")
-                    if swap_config(False):
-                        # Signal main thread to reload
-                        config_changed = True
-
-                was_beamng_running = beamng_running
-            except Exception as e:
-                logging.error(f"Error in BeamNG monitor: {e}")
-
-            time.sleep(BEAMNG_POLL_INTERVAL)
-
-    monitor = threading.Thread(target=monitor_thread, daemon=True)
-    monitor.start()
-    return monitor
+        shutil.copy2(NORMAL_CONFIG, CONFIG_FILE)
+        logging.info("Put the real layout back into config.json; the dashboard "
+                     "is an overlay now")
+    except OSError as e:
+        logging.error("Could not restore config.json from %s: %s", NORMAL_CONFIG, e)
 
 # Other functions from your existing main.py
 def camel_to_snake(name):
@@ -558,30 +493,62 @@ def render_backdrop(artwork, compositor, handback=None):
         return image, (), artwork.ticker()
     return render_gauges(compositor)
 
-def render_panel(overview, artwork, compositor):
-    """The frame, and which of the three drew it.
+def render_dash(beamng, artwork, compositor, handback=None):
+    """What the panel shows beneath the overview: the driving dashboard, the
+    artwork, or the gauges, and the ticker whose row the overview shares.
 
-    The overview comes first and covers both others; the artwork covers the
-    gauges. Each slides in over what it covers rather than cutting, so it gets
-    that as a callable and renders it only on the frames the slide actually
-    covers ground on.
+    The dashboard covers the artwork and its visualizer - something being
+    driven by should not be interrupted by the cover of whatever is playing -
+    and the artwork covers the gauges. Words handed back by the overview go to
+    whichever of the three will have the row.
+    """
+    if handback is not None:
+        if beamng.showing():
+            beamng.take_back(**handback)
+        elif artwork.playing():
+            artwork.take_back(**handback)
+        else:
+            ticker = compositor.ticker()
+            if ticker is not None:
+                ticker.take_back(**handback)
+    image = beamng.render(
+        lambda words=None: render_backdrop(artwork, compositor, words))
+    if image is not None:
+        return image, (), beamng.ticker()
+    return render_backdrop(artwork, compositor)
+
+def render_panel(overview, beamng, artwork, compositor):
+    """The frame, and which of the four drew it.
+
+    The overview covers everything; the dashboard covers the artwork and the
+    gauges; the artwork covers the gauges. Each slides in over what it covers
+    rather than cutting, so it gets that as a callable and renders it only on
+    the frames the slide actually covers ground on.
     """
     image = overview.render(
-        lambda handback=None: render_backdrop(artwork, compositor, handback))
+        lambda handback=None: render_dash(beamng, artwork, compositor, handback))
     if image is not None:
         return image, 'overview'
+    image = beamng.render(
+        lambda words=None: render_backdrop(artwork, compositor, words))
+    if image is not None:
+        return image, 'beamng'
     image = artwork.render(lambda words=None: render_gauges(compositor, words))
     if image is not None:
         return image, 'artwork'
     return compositor.render(), 'gauges'
 
-def panel_layout(drawn, artwork, compositor):
+def panel_layout(drawn, beamng, artwork, compositor):
     """How the frame `drawn` by render_panel is laid out, for the sockets'
     effects to bring it back into place: ('split', ticker) with a title row
     over the rest - ticker being what has the row, if it can be handed over -
     or ('whole', None)."""
     if drawn == 'overview':
         return 'split', None
+    if drawn == 'beamng':
+        if beamng.full_panel():
+            return 'whole', None
+        return 'split', beamng.ticker()
     if drawn == 'artwork':
         if artwork.full_panel():
             return 'whole', None
@@ -590,13 +557,14 @@ def panel_layout(drawn, artwork, compositor):
     return ('split', ticker) if ticker is not None else ('whole', None)
 
 def main():
-    global config_changed  # Declare global at the beginning of the function
-
     width, height = WIDTH, HEIGHT
     config_file = CONFIG_FILE
 
-    # Start the BeamNG monitor thread
-    monitor_thread = start_beamng_monitor()
+    # config.json used to be swapped for the dashboard layout while the game
+    # ran, and is now an overlay instead. A service that stopped while the swap
+    # was in force left the dashboard layout behind as though it were the real
+    # one, so put the real one back before anything reads it.
+    unswap_config()
 
     # Initial configuration load
     config = load_config(config_file)
@@ -606,6 +574,9 @@ def main():
     # Not part of the layout: it takes the whole panel when the shell says
     # there is something to show, and is inert otherwise.
     artwork = ArtworkOverlay(width, height)
+    # Over the artwork: the driving dashboard, up only while the game has the
+    # keyboard. Its settings still come from config.json.beamng.
+    beamng = BeamngOverlay(width, height, config_file=BEAMNG_CONFIG)
     # Above both: while the overview is open it has the whole panel, and
     # slides over whatever the two below were showing.
     overview = OverviewOverlay(width, height)
@@ -623,14 +594,10 @@ def main():
     if scroll_speed is not None:
         compositor.set_scroll_speed(scroll_speed)
         artwork.set_scroll_speed(scroll_speed)
+        beamng.set_scroll_speed(scroll_speed)
         overview.set_scroll_speed(scroll_speed)
         plugs.set_scroll_speed(scroll_speed)
         logging.info(f"Scroll speed: {scroll_speed:.1f} px/s")
-
-    # Start OutGauge reader if BeamNG is running at startup
-    if is_beamng_running():
-        if not outgauge_reader._thread or not outgauge_reader._thread.is_alive():
-            outgauge_reader.start()
 
     panel.set_brightness(read_brightness(panel.brightness))
 
@@ -660,35 +627,21 @@ def main():
                     scroll_speed = new_speed
                     compositor.set_scroll_speed(scroll_speed)
                     artwork.set_scroll_speed(scroll_speed)
+                    beamng.set_scroll_speed(scroll_speed)
                     overview.set_scroll_speed(scroll_speed)
                     plugs.set_scroll_speed(scroll_speed)
                     logging.info(f"Scroll speed -> {scroll_speed:.1f} px/s")
-
-            # Check if configuration has changed
-            if config_changed:
-                logging.info("Reloading configuration...")
-                try:
-                    config = load_config(config_file)
-                    compositor = load_modules(config, width, height)
-                    if scroll_speed is not None:
-                        # Fresh modules start from config.json, so reapply the
-                        # runtime override or a reload would silently undo it.
-                        compositor.set_scroll_speed(scroll_speed)
-                    config_changed = False
-                    logging.info("Configuration reloaded successfully")
-                except Exception as e:
-                    logging.error(f"Failed to reload configuration: {e}")
 
             # Render and display, through whatever the sockets are doing.
             spent = [0.0]       # seconds this frame spent on the modules
             def under():
                 started = time.monotonic()
-                image, drawn[0] = render_panel(overview, artwork, compositor)
+                image, drawn[0] = render_panel(overview, beamng, artwork, compositor)
                 spent[0] += time.monotonic() - started
                 return image
             began = time.monotonic()
             final_image = plugs.render(
-                under, lambda: panel_layout(drawn[0], artwork, compositor))
+                under, lambda: panel_layout(drawn[0], beamng, artwork, compositor))
             drew = time.monotonic()
             panel.draw(final_image)
             done = time.monotonic()
