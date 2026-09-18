@@ -1,5 +1,5 @@
 {
-  "uuid": "pixeled-workspaces@pixeled",
+  "uuid": "pixeled-workspaces@ecca",
   "name": "Pixeled Shell State",
   "description": "Publishes shell state the pixeled LED matrix service cannot see for itself, as it runs as a system unit with no session bus. ~/.cache/pixeled/workspaces carries the active workspace index and count for the workspace indicator; ~/.cache/pixeled/overview carries, while the overview is open, every workspace's window outlines and titles and the view's live position between workspaces; ~/.cache/pixeled/artwork carries the playing track's cover art, title and artist, for the full-panel artwork. It also adds a quick settings slider, under the screen brightness slider, for the LED matrix's own brightness, saved to ~/.config/pixeled/brightness. GNOME on Wayland exposes none of this over any unprivileged interface: _NET_CURRENT_DESKTOP is not published to XWayland, Shell.Introspect.GetWindows denies unlisted callers, and Shell.Eval is off outside unsafe mode.",
   "shell-version": ["48", "49", "50"],

@@ -129,7 +129,7 @@ mkdir -p "$RUN_HOME/.config/pixeled" "$RUN_HOME/.cache/pixeled"
 # ── 3. The GNOME extension ───────────────────────────────────────────────────
 
 if $do_extension; then
-  uuid="pixeled-workspaces@pixeled"
+  uuid="pixeled-workspaces@ecca"
   dest="$RUN_HOME/.local/share/gnome-shell/extensions/$uuid"
   if [ -d "$SOURCE_DIR/gnome-extension/$uuid" ]; then
     say "installing the GNOME extension"

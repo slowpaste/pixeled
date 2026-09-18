@@ -53,5 +53,6 @@ is running, fed by OutGauge over UDP on localhost:8888.
 
 ## Branches
 
-`main` is the general version. `personal` is the author's own, which differs
-only in keeping the extension UUID their shell already has installed.
+This is `personal`, which differs from `main` only in keeping the extension
+UUID this machine's shell already has installed and enabled. Layout changes
+that are nobody else's business belong here too, not on `main`.
