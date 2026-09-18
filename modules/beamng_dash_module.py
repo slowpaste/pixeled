@@ -8,6 +8,7 @@ from PIL import Image
 from modules.module_base import ModuleBase
 from utils.tiny_font import tiny_font
 from utils.udp_outgauge_utility import get_telemetry
+from utils.udp_outsim_utility import get_motion, outsim_reader
 
 
 class _Canvas:
@@ -64,13 +65,6 @@ class _Canvas:
                 w = wx * wy
                 self.buf[yy, xx] = self.buf[yy, xx] * (1.0 - w) + level * w
 
-    def vline(self, x, y0, y1, level, fade=1.0):
-        """A vertical line at a fractional column. `fade` dims every other row,
-        which is how the speedometer stays a different object from the
-        tachometer without costing it half its pixels."""
-        for row in range(y0, y1 + 1):
-            self.blend(x, row, level if row % 2 == 0 else level * fade)
-
     def hline(self, y, x0, x1, level):
         for col in range(x0, x1 + 1):
             self.point(col, y, level)
@@ -80,16 +74,6 @@ class _Canvas:
         for dy in range(-half, half + 1):
             for dx in range(-half, half + 1):
                 self.blend(cx + dx, cy + dy, level)
-
-    def column(self, x0, x1, bottom, filled, level):
-        """Bars growing up from `bottom`, `filled` rows tall, the last row of
-        them part-lit for the fraction."""
-        whole = int(filled)
-        for i in range(whole):
-            self.hline(bottom - i, x0, x1, level)
-        frac = filled - whole
-        if frac > 0.0:
-            self.hline(bottom - whole, x0, x1, level * frac)
 
     def image(self):
         np.clip(self.buf, 0.0, 255.0, out=self.buf)
@@ -104,12 +88,20 @@ class BeamngDashModule(ModuleBase):
     sit far below the readings they carry rather than being dithered away from
     them, and the whole dash is shoved around by the car's own acceleration.
 
-    Top to bottom, with a blank row between each section:
+    Top to bottom:
 
-        rows  0- 4   tachometer, a needle over a dim bar, redline zone marked
-        rows  6- 9   speedometer, the same needle with alternate rows dimmed
-        rows 11-21   6-speed H pattern, dim gate, bright marker with a trail
-        rows 23-33   clutch, brake and throttle, three bars over dim tracks
+        rows  0- 4   tachometer: the tip of a needle on a dial's arc
+        rows  6- 9   speedometer: the same, on a shallower arc
+        rows 12-26   6-speed H pattern, dim gate, bright marker with a trail
+        rows 30-33   clutch, brake and throttle, three lights that come up
+                     with the pedal
+
+    The dials are read the way a car's are, by where the needle points rather
+    than by how far along a row something is, and they cost four rows between
+    them for the arcs. The pedals gave the room back: three lights say what
+    three eleven-row bars said, in brightness instead of in height, which is
+    what having 256 of them is for. What is left over went to the gearbox,
+    which sits lower and taller than it did, and to the space around it.
 
     Brightness is what separates a guide from a reading. The gate, the sweep
     tracks and the pedals' empty travel sit at a tenth or so of full, the bar
@@ -118,11 +110,10 @@ class BeamngDashModule(ModuleBase):
     the difference between a dash that reads at a glance and a lit box with
     brighter spots in it.
 
-    Both needles are placed to a fraction of a column. A 9-wide sweep gives 8
-    pixels of travel, and sharing a needle's light between the pair it falls
-    between makes the distance between two of them legible - an idle creeping
-    up, a speed settling - where whole-pixel steps gave 9 readings and a
-    flicker between them.
+    Both tips are placed to a fraction of a pixel, along the arc and across it,
+    so a reading moves smoothly through a dial that is only nine pixels wide -
+    an idle creeping up, a speed settling - where whole-pixel steps gave nine
+    readings and a flicker between them.
 
     The upshift warning breathes rather than blinks. The redline zone brightens
     and falls back a few times a second while the needle stays fully lit above
@@ -146,31 +137,38 @@ class BeamngDashModule(ModuleBase):
     to relearn and is the harmless direction to be wrong in.
     """
 
-    # Section heights, top to bottom. The pedal bars take whatever is left, so
-    # only these three plus the gaps are fixed.
+    # Section heights, top to bottom. The pedal lights take whatever is left,
+    # so only these three plus the gaps are fixed.
     TACH_ROWS = 5
     SPEED_ROWS = 4
-    H_ROWS = 11
-    MIN_PEDAL_ROWS = 4
-    GAP = 1
+    H_ROWS = 15
+    MIN_PEDAL_ROWS = 2
+    GAP = 1             # between the two dials, which belong together
+    DIAL_GAP = 2        # under them, before the gearbox
+    SHIFT_GAP = 3       # under that, before the pedals at the foot of the panel
+    # Rows a dial keeps below its arc, so the tip's light at either end has
+    # somewhere to spill without touching the section under it.
+    DIAL_MARGIN = 1
 
     PEDALS = ('clutch', 'brake', 'throttle')   # left to right, as in the footwell
 
     # Brightness. Guides an order below readings; see the class docstring.
-    TRACK = 16          # the sweep a needle has to travel
-    BAR = 44            # zero up to the needle, filled in
-    REDLINE = 70        # the share of the tachometer past the upshift point
-    WARN_PEAK = 165     # what that rises to at the top of the warning's breath
-    WARN_WASH = 40      # and what the rest of the band rises to with it
+    # The arc is drawn one mark per column, and a mark on a curve is shared
+    # between the two rows it falls across - so it is set high enough that each
+    # half of it still reads as a lit pixel.
+    TRACK = 36          # the arc a tip has to travel
+    REDLINE = 50        # added to it past the upshift point
+    WARN_WASH = 45      # and to the whole arc, breathing, while it warns
     GATE = 26           # the H pattern the shift marker runs on
     NODE = 72           # where a gear sits on it
     NEEDLE = 255
-    BG_CEILING = 150    # the most any guide may reach, so a needle always tells
+    BG_CEILING = 120    # the most any guide may reach, so the tip always tells
     MARKER = 255
     TRAIL = 0.5         # share of full the marker's wake carries
     TRAIL_TAU = 0.11    # seconds it takes to fade by e
     PEDAL = 255
-    PEDAL_TRACK = 14    # the travel a pedal has left
+    PEDAL_OFF = 12      # a pedal all the way up, still saying it is there
+    PEDAL_CURVE = 0.65  # travel to brightness, bent the way the eye bends it
 
     MAX_DT = 0.25          # clamp, so a stall can't teleport the shift marker
     DL_SHIFT = 0x01        # OutGauge dash light bit for the shift indicator
@@ -208,7 +206,8 @@ class BeamngDashModule(ModuleBase):
     def __init__(self, height=34, max_speed=55.0, redline_floor=4500.0,
                  shift_fraction=0.92, shift_release=0.05, shift_speed=30.0,
                  neutral_return=0.8, flash_hz=8.0, motion=True, lean_px=1.5,
-                 lean_g=1.1, impact_g=5.0, shake_px=2.5):
+                 lean_g=1.1, impact_g=5.0, shake_px=2.5, lateral_sign=1.0,
+                 outsim_ip="127.0.0.1", outsim_port=4444):
         """
         :param max_speed: m/s at the right edge of the speedometer. Only a
             starting point - the scale grows if it is ever exceeded, so the
@@ -233,12 +232,21 @@ class BeamngDashModule(ModuleBase):
             firmware, which draws at a tenth of the patched firmware's rate.
         :param motion: whether the car's acceleration moves the dash at all.
         :param lean_px: pixels the dash leans at lean_g.
-        :param lean_g: acceleration, in g, that leans it that far.
+        :param lean_g: acceleration, in g, that leans it that far, either way
+            along the car and either way across it.
+        :param lateral_sign: -1 if corners lean the dash the wrong way. Which
+            way round BeamNG counts a yaw is the one thing in here that cannot
+            be settled without driving the car, so it is left as a switch.
         :param impact_g: acceleration no tyre can produce, so anything past it
             is taken for a collision: it kicks the dash sideways as well as
             along, and throws a brief wash of light over the whole panel.
         :param shake_px: the furthest the dash is ever allowed to be shoved,
             so a heavy crash cannot push a gauge off the panel.
+        :param outsim_ip: address OutSim is sent to, for the sideways lean.
+        :param outsim_port: and its port, 4444 as BeamNG's own settings have
+            it. OutSim is a switch of its own in the game (Options > Other >
+            Protocols, beside OutGauge); with it off, everything else here
+            carries on and the dash simply never leans into a corner.
         """
         super().__init__(height)
         # Both are divisors every frame, so a zero from config.json would take
@@ -255,11 +263,14 @@ class BeamngDashModule(ModuleBase):
         self.lean_g = max(lean_g, 0.1)
         self.impact_g = impact_g
         self.shake_px = shake_px
+        self.lateral_sign = lateral_sign
+        if motion:
+            outsim_reader.listen_on(outsim_ip, outsim_port)
 
         self.tach_y = 0
         self.speed_y = self.tach_y + self.TACH_ROWS + self.GAP
-        self.h_y = self.speed_y + self.SPEED_ROWS + self.GAP
-        self.pedal_y = self.h_y + self.H_ROWS + self.GAP
+        self.h_y = self.speed_y + self.SPEED_ROWS + self.DIAL_GAP
+        self.pedal_y = self.h_y + self.H_ROWS + self.SHIFT_GAP
         self.pedal_rows = height - self.pedal_y
         if self.pedal_rows < self.MIN_PEDAL_ROWS:
             raise ValueError(
@@ -299,6 +310,7 @@ class BeamngDashModule(ModuleBase):
         self._accel = 0.0          # m/s^2 along the car, smoothed
         self._flash = 0.0          # 0-1, light thrown by a collision
         self._impacts = 0
+        self._outsim = False       # whether OutSim is sending, for the log
         self._last_packet_at = None
         self._last_speed = 0.0
 
@@ -406,19 +418,28 @@ class BeamngDashModule(ModuleBase):
     def _update_motion(self, dt, tel, live):
         """Shove the whole dash about from the car's own acceleration.
 
-        OutGauge carries no accelerometer: no lateral g, no vertical, no
-        heading, not even a steering angle. The one motion in the packet is the
-        speed, so the one force that can be recovered is the one along the car,
-        differentiated between packets. Braking leans the dash down the panel
-        and accelerating lifts it, the way the car's own mass moves.
+        The dash is the mass, and it goes where the driver goes. Under power
+        it is dragged down the panel, the way you are pressed back into the
+        seat; braking throws it up the panel, the way you are thrown forward
+        against the belt. A corner throws it to the outside.
+
+        Along the car, that comes out of OutGauge, which carries no
+        accelerometer at all - the speed differentiated between packet
+        arrivals is the whole of it. Across the car it comes out of OutSim,
+        which BeamNG sends separately and which has to be switched on: the
+        heading differentiated is a yaw rate, and a yaw rate times the speed is
+        the lateral acceleration a corner is putting through the car. With
+        OutSim off, the sideways lean is simply never asked for and the dash
+        leans along the car alone.
 
         Anything past impact_g is not something tyres can do to a car, so it is
         taken for a collision rather than for driving: it kicks the spring
-        sideways as well, which a lean never does, and throws a wash of light
-        over the panel that fades in a fifth of a second. The sideways kick
-        alternates, because nothing in the packet says which side was hit.
+        sideways as well, which a lean cannot do on its own, and throws a wash
+        of light over the panel that fades in a fifth of a second. The sideways
+        kick alternates, because nothing in either packet says which side was
+        hit.
 
-        The dash hangs on a spring either way, so the lean arrives with a little
+        The dash hangs on a spring throughout, so a lean arrives with a little
         overshoot and a hit rings out instead of snapping back.
         """
         if not self.motion:
@@ -426,16 +447,17 @@ class BeamngDashModule(ModuleBase):
             self._flash = 0.0
             return
 
+        speed = tel.get('speed', 0.0) if live else 0.0
+
         received = tel.get('received_at') if live else None
         if received is not None and received != self._last_packet_at:
             gap = None if self._last_packet_at is None else received - self._last_packet_at
-            speed = tel.get('speed', 0.0)
             if gap is not None and self.PACKET_MIN <= gap <= self.PACKET_MAX:
-                accel = (speed - self._last_speed) / gap
+                accel = (tel.get('speed', 0.0) - self._last_speed) / gap
                 if abs(accel) > self.impact_g * self.G:
                     self._impacts += 1
                     hit = min(abs(accel) / (self.impact_g * self.G), 4.0)
-                    self._shove_v[1] += math.copysign(9.0 * hit, -accel)
+                    self._shove_v[1] += math.copysign(9.0 * hit, accel)
                     self._shove_v[0] += 6.0 * hit * (1 if self._impacts % 2 else -1)
                     self._flash = min(1.0, self._flash + 0.5 * hit)
                     logging.info("BeamngDash: %.0f m/s^2 in %.0fms reads as a hit",
@@ -445,14 +467,34 @@ class BeamngDashModule(ModuleBase):
                 weight = 1.0 - math.exp(-gap / self.LEAN_TAU)
                 self._accel += (accel - self._accel) * weight
             self._last_packet_at = received
-            self._last_speed = speed
+            self._last_speed = tel.get('speed', 0.0)
         elif not live:
             self._accel += (0.0 - self._accel) * min(1.0, dt / self.LEAN_TAU)
 
-        # Braking is a negative acceleration and leans the dash down the panel,
-        # so the target takes the sign as it comes.
-        lean = -self._accel / (self.lean_g * self.G)
-        target = (0.0, max(-1.0, min(1.0, lean)) * self.lean_px)
+        # Yaw rate times speed is the lateral acceleration, and the dash is
+        # thrown to the outside of the corner by it - the same way it is thrown
+        # up the panel under braking, and for the same reason. Taking a
+        # positive yaw for a left turn, the outside is to the right, which is a
+        # positive shove; whether BeamNG counts a yaw that way round is the one
+        # thing in here that cannot be settled without driving it, hence
+        # lateral_sign.
+        sideways = 0.0
+        motion = get_motion()
+        got = motion.get('received_at')
+        if got is not None and time.monotonic() - got < self.STALE_AFTER:
+            if not self._outsim:
+                self._outsim = True
+                logging.info("BeamngDash: OutSim is up, leaning into corners too")
+            sideways = speed * motion.get('yaw_rate', 0.0) * self.lateral_sign
+        elif self._outsim:
+            self._outsim = False
+            logging.info("BeamngDash: OutSim has gone quiet")
+
+        # Under power the dash is dragged down the panel, so the lean takes the
+        # acceleration's sign as it comes.
+        full = self.lean_g * self.G
+        target = (max(-1.0, min(1.0, sideways / full)) * self.lean_px,
+                  max(-1.0, min(1.0, self._accel / full)) * self.lean_px)
         for step in self._steps(dt):
             for axis in (0, 1):
                 pull = -self.SPRING * (self._shove[axis] - target[axis])
@@ -584,42 +626,49 @@ class BeamngDashModule(ModuleBase):
         return 0.5 - 0.5 * math.cos(2.0 * math.pi * hz * (now - self._warning_since))
 
     # ── drawing ──────────────────────────────────────────────────────────────
-    def _draw_sweep(self, canvas, width, y0, rows, value, fade=1.0, zone=None,
-                    wash=0.0):
-        """One gauge: a dim track the full width, a brighter bar from zero up to
-        the reading, and the needle itself at the fractional column it falls on.
+    def _dial(self, y0, rows, u, width):
+        """Where the needle's tip is at reading `u`, on a dial's arc.
 
-        The bar is what makes a glance work - how far along the sweep is, read
-        as an area rather than as the position of one line - and the needle is
-        what makes a small change visible, since it moves between columns
-        instead of jumping from one to the next.
+        A parabola, not a circle: over a chord nine pixels long the two are the
+        same curve to within a fraction of a pixel, and this one is stated in
+        the terms that matter - the tip is at the top of the section dead
+        centre, and drops `sag` rows by either end, exactly like the needle of
+        a dial whose pivot is off the bottom of the panel.
+
+        Only the tip is drawn, never the arm. An arm long enough to look like
+        one would cross the whole section and leave nowhere for the reading.
+        """
+        sag = rows - 1 - self.DIAL_MARGIN
+        return u * (width - 1), y0 + sag * (2.0 * u - 1.0) ** 2
+
+    def _draw_dial(self, canvas, width, y0, rows, value, zone=None, wash=0.0):
+        """One dial: a dim arc for the tip to travel, the part of it past the
+        upshift point marked brighter, and the tip itself.
+
+        Nothing fills the arc behind the tip. A bar reads as how far along a
+        row something is, which is the thing these gauges stopped being; a dial
+        says it by where it points, and the arc is there to be pointed along.
+
+        The arc is drawn a column at a time rather than by walking the curve,
+        so every column gets exactly one mark and the track comes out evenly
+        lit - stepping along the curve would crowd marks where it flattens out
+        and leave the ends thin.
         """
         value = min(max(value, 0.0), 1.0)
         span = width - 1
-        x = value * span
-        for row in range(y0, y0 + rows):
-            dim = 1.0 if row % 2 == 0 else fade
-            self._track_row(canvas, width, row, (self.TRACK + wash) * dim)
-            if zone is not None:
-                start, zone_level = zone
-                for col in range(int(math.ceil(start * span)), width):
-                    canvas.point(col, row, zone_level * dim)
-            whole = int(x)
-            for col in range(whole):
-                canvas.point(col, row, self.BAR * dim)
-            edge = x - whole
-            if edge > 0.0:
-                canvas.point(whole, row, self.BAR * dim * edge)
-        # Everything so far is guide: hold it below the needle before the
-        # needle goes over it, so the reading survives its own warning.
+        for col in range(width):
+            u = col / span if span else 0.0
+            _, y = self._dial(y0, rows, u, width)
+            level = self.TRACK + wash
+            if zone is not None and u >= zone:
+                level += self.REDLINE
+            canvas.point(col, y, level)
+        # Everything so far is guide: hold it below the tip before the tip goes
+        # over it, so the reading survives its own warning.
         band = canvas.buf[y0:y0 + rows]
         np.clip(band, 0.0, self.BG_CEILING, out=band)
-        canvas.vline(x, y0, y0 + rows - 1, self.NEEDLE, fade)
-
-    @staticmethod
-    def _track_row(canvas, width, row, level):
-        for col in range(width):
-            canvas.point(col, row, level)
+        tip_x, tip_y = self._dial(y0, rows, value, width)
+        canvas.blend(tip_x, tip_y, self.NEEDLE)
 
     def _draw_shifter(self, canvas, dt):
         """The H pattern, plus the marker running on it.
@@ -682,30 +731,46 @@ class BeamngDashModule(ModuleBase):
                         canvas.point(x0 + col * scale + dx,
                                      y0 + row * scale + dy, self.MARKER)
 
-    def _draw_pedals(self, canvas, width, tel):
-        """Clutch, brake and throttle, growing up from the bottom edge.
-
-        Three bars of a third of the width each, with no gap between them: at
-        nine columns a separator would cost a third of every bar. Instead each
-        pedal's empty travel is a dim line up the middle of its own bar, so the
-        three read as three even when none of them is touched - a dim track the
-        full width of each would have merged into one unbroken block, which is
-        the same thing as drawing nothing.
-
-        The top row of each bar is lit for the fraction of a pixel it covers, so
-        a pedal eased on moves smoothly instead of in eleven steps, and two
-        neighbours at the same height still merge into one block, which is a
-        fair reading of two pedals at the same travel.
+    def _pedal_layout(self, width):
+        """Where the three lights sit, left to right, with a dark column
+        between them. A spare column goes to the middle one, which is the
+        brake - the pedal a glance is most often after.
         """
-        bar_w = max(1, width // len(self.PEDALS))
+        n = len(self.PEDALS)
+        base, extra = divmod(width - (n - 1), n)
+        widths = [base] * n
+        outward = sorted(range(n), key=lambda i: abs(i - (n - 1) / 2.0))
+        for i in range(extra):
+            widths[outward[i % n]] += 1
+        spans, x = [], 0
+        for w in widths:
+            spans.append((x, x + w - 1))
+            x += w + 1
+        return spans
+
+    def _draw_pedals(self, canvas, width, tel):
+        """Clutch, brake and throttle as three lights that come up with the
+        pedal, rather than as three bars that grow.
+
+        A bar spends a row of the panel on every step it can show, and eleven
+        rows is a lot of panel for something a glance only needs the sense of.
+        A light says the same thing in the brightness of four rows, which is
+        what 256 levels are for, and gives the rest of the height back to the
+        gearbox and the dials.
+
+        The travel is curved before it becomes brightness. Light off an LED
+        climbs with its duty cycle, but the eye does not: without the curve the
+        first third of a pedal is nearly invisible and the last third all looks
+        the same. An untouched pedal still sits at PEDAL_OFF, so three dark
+        lights say the pedals are up rather than that the dash has stopped.
+        """
         bottom = self.height - 1
-        for i, pedal in enumerate(self.PEDALS):
-            x0 = i * bar_w
-            x1 = x0 + bar_w - 1
-            for row in range(self.pedal_y, bottom + 1):
-                canvas.point((x0 + x1) / 2.0, row, self.PEDAL_TRACK)
+        for (x0, x1), pedal in zip(self._pedal_layout(width), self.PEDALS):
             value = min(max(tel.get(pedal, 0.0), 0.0), 1.0)
-            canvas.column(x0, x1, bottom, value * self.pedal_rows, self.PEDAL)
+            level = self.PEDAL_OFF + (value ** self.PEDAL_CURVE) * (
+                self.PEDAL - self.PEDAL_OFF)
+            for row in range(self.pedal_y, bottom + 1):
+                canvas.hline(row, x0, x1, level)
 
     def render(self, width):
         self._ensure_geometry(width)
@@ -737,17 +802,15 @@ class BeamngDashModule(ModuleBase):
 
         warning = self._shift_up(tel, gear, live, now)
         pulse = self._warn_pulse(now) if warning else 0.0
-        zone = (self.shift_fraction,
-                self.REDLINE + pulse * (self.WARN_PEAK - self.REDLINE))
         # The rest of the band comes up with the zone, so the warning is a whole
         # block breathing rather than a bright edge appearing - and both are
         # held under BG_CEILING, so the needle stays the brightest thing in the
         # row at every point in the breath.
-        self._draw_sweep(canvas, width, self.tach_y, self.TACH_ROWS,
-                         tel.get('rpm', 0.0) / self._redline, zone=zone,
-                         wash=pulse * self.WARN_WASH)
-        self._draw_sweep(canvas, width, self.speed_y, self.SPEED_ROWS,
-                         tel.get('speed', 0.0) / self._speed_scale, fade=0.45)
+        self._draw_dial(canvas, width, self.tach_y, self.TACH_ROWS,
+                        tel.get('rpm', 0.0) / self._redline,
+                        zone=self.shift_fraction, wash=pulse * self.WARN_WASH)
+        self._draw_dial(canvas, width, self.speed_y, self.SPEED_ROWS,
+                        tel.get('speed', 0.0) / self._speed_scale)
         if gear <= 0:
             self._draw_reverse(canvas, width)
         else:
