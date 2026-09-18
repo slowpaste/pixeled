@@ -1,0 +1,223 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 50a4c9f..95e47d0 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -786,7 +786,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "fl16-inputmodules"
+-version = "0.2.0"
++version = "0.2.0-pixeled"
+ dependencies = [
+  "cortex-m",
+  "cortex-m-rt",
+@@ -1116,7 +1116,7 @@ checksum = "830d08ce1d1d941e6b30645f1a0eb5643013d835ce3779a5fc208261dbe10f55"
+ 
+ [[package]]
+ name = "ledmatrix"
+-version = "0.2.0"
++version = "0.2.0-pixeled"
+ dependencies = [
+  "cortex-m",
+  "cortex-m-rt",
+diff --git a/fl16-inputmodules/Cargo.toml b/fl16-inputmodules/Cargo.toml
+index 4af886d..6cf79b4 100644
+--- a/fl16-inputmodules/Cargo.toml
++++ b/fl16-inputmodules/Cargo.toml
+@@ -1,7 +1,7 @@
+ [package]
+ edition = "2021"
+ name = "fl16-inputmodules"
+-version = "0.2.0"
++version = "0.2.0-pixeled"
+ 
+ [dependencies]
+ crc = "3.0"
+diff --git a/fl16-inputmodules/src/control.rs b/fl16-inputmodules/src/control.rs
+index 23875bd..c2d08a9 100644
+--- a/fl16-inputmodules/src/control.rs
++++ b/fl16-inputmodules/src/control.rs
+@@ -71,6 +71,8 @@ pub enum CommandVals {
+     PwmFreq = 0x1E,
+     DebugMode = 0x1F,
+     Version = 0x20,
++    /// pixeled: LED driver global current, with an argument sets, without gets
++    GlobalCurrent = 0x30,
+ }
+ 
+ #[derive(num_derive::FromPrimitive)]
+@@ -207,6 +209,10 @@ pub enum Command {
+     #[cfg(feature = "ledmatrix")]
+     SetPwmFreq(PwmFreqArg),
+     GetPwmFreq,
++    #[cfg(feature = "ledmatrix")]
++    SetGlobalCurrent(u8),
++    #[cfg(feature = "ledmatrix")]
++    GetGlobalCurrent,
+     SetDebugMode(bool),
+     GetDebugMode,
+     _Unknown,
+@@ -394,6 +400,11 @@ pub fn parse_module_command(count: usize, buf: &[u8]) -> Option<Command> {
+             } else {
+                 Command::GetDebugMode
+             }),
++            Some(CommandVals::GlobalCurrent) => Some(if let Some(current) = arg {
++                Command::SetGlobalCurrent(current)
++            } else {
++                Command::GetGlobalCurrent
++            }),
+             _ => None,
+         }
+     } else {
+@@ -632,6 +643,16 @@ pub fn handle_command(
+             response[0] = state.debug_mode as u8;
+             Some(response)
+         }
++        Command::SetGlobalCurrent(current) => {
++            state.global_current = *current;
++            matrix.set_global_current(state.global_current).unwrap();
++            None
++        }
++        Command::GetGlobalCurrent => {
++            let mut response: [u8; 32] = [0; 32];
++            response[0] = state.global_current;
++            Some(response)
++        }
+         _ => handle_generic_command(command),
+     }
+ }
+diff --git a/fl16-inputmodules/src/fl16.rs b/fl16-inputmodules/src/fl16.rs
+index 8b9f042..2d2bc71 100644
+--- a/fl16-inputmodules/src/fl16.rs
++++ b/fl16-inputmodules/src/fl16.rs
+@@ -678,6 +678,24 @@ where
+         Ok(())
+     }
+ 
++    /// pixeled: set the IS31FL3741's global current control register.
++    ///
++    /// Scales the current through every LED at once, 0-255, independently of
++    /// the per-LED PWM values - so dimming the panel this way keeps all 256
++    /// PWM steps for the picture, where the brightness setting squeezes them.
++    /// setup() leaves it at 0xFF. The driver crate keeps its register writes
++    /// private, so this is its unlock/page-select/write sequence by hand; the
++    /// page it leaves selected does not matter, as every other write selects
++    /// its own first.
++    pub fn set_global_current(&mut self, current: u8) -> Result<(), I2cError> {
++        let address = self.device.address;
++        // Unlock the page select register, then select page 4 (function).
++        self.device.i2c.write(address, &[0xFE, 0xC5])?;
++        self.device.i2c.write(address, &[0xFD, 0x04])?;
++        // Register 0x01 on page 4 is global current control.
++        self.device.i2c.write(address, &[0x01, current])
++    }
++
+     pub fn fill_brightness(&mut self, brightness: u8) -> Result<(), Error<I2cError>> {
+         for x in 0..self.device.width {
+             for y in 0..self.device.height {
+diff --git a/fl16-inputmodules/src/matrix.rs b/fl16-inputmodules/src/matrix.rs
+index 8046db4..16869f1 100644
+--- a/fl16-inputmodules/src/matrix.rs
++++ b/fl16-inputmodules/src/matrix.rs
+@@ -33,6 +33,8 @@ pub struct LedmatrixState {
+     pub animate: bool,
+     /// LED brightness out of 255
+     pub brightness: u8,
++    /// pixeled: LED driver global current control, out of 255
++    pub global_current: u8,
+     /// Current sleep state
+     pub sleeping: SleepState,
+     /// State of the current game, if any
+diff --git a/ledmatrix/Cargo.toml b/ledmatrix/Cargo.toml
+index 563971c..0ea0914 100644
+--- a/ledmatrix/Cargo.toml
++++ b/ledmatrix/Cargo.toml
+@@ -1,7 +1,7 @@
+ [package]
+ edition = "2021"
+ name = "ledmatrix"
+-version = "0.2.0"
++version = "0.2.0-pixeled"
+ 
+ [features]
+ 10k = []
+diff --git a/ledmatrix/src/main.rs b/ledmatrix/src/main.rs
+index c09b702..9b8bdab 100644
+--- a/ledmatrix/src/main.rs
++++ b/ledmatrix/src/main.rs
+@@ -235,6 +235,7 @@ fn main() -> ! {
+         col_buffer: Grid::default(),
+         animate: false,
+         brightness: 51, // Default to 51/255 = 20% brightness
++        global_current: 0xFF, // what LedMatrix::setup leaves it at
+         sleeping: SleepState::Awake,
+         game: None,
+         animation_period: 31_250, // 31,250 us = 32 FPS
+@@ -385,7 +386,11 @@ fn main() -> ! {
+ 
+         // Handle period display updates. Don't do it too often
+         let render_again = timer.get_counter().ticks() > animation_timer + state.animation_period;
+-        if matches!(state.sleeping, SleepState::Awake) && render_again {
++        // pixeled: only redraw on the timer when something is changing the
++        // grid on it. Otherwise this rewrote an unchanged grid every 31ms,
++        // costing a redraw's worth of I2C time out of every ~30ms of commands.
++        let animating = state.animate || state.upcoming_frames.is_some() || state.game.is_some();
++        if matches!(state.sleeping, SleepState::Awake) && render_again && animating {
+             if let Some(ref mut upcoming) = state.upcoming_frames {
+                 if let Some(next_frame) = upcoming.next() {
+                     state.grid = next_frame;
+@@ -494,7 +499,13 @@ fn main() -> ! {
+                             .unwrap();
+                             // let _ = serial.write(text.as_bytes());
+ 
+-                            fill_grid_pixels(&state, &mut matrix);
++                            // pixeled: staging a greyscale column only writes the
++                            // off-screen buffer, so there is nothing new to show.
++                            // Redrawing anyway made a greyscale frame cost ten
++                            // full I2C redraws instead of one.
++                            if !matches!(command, Command::StageGreyCol(_, _)) {
++                                fill_grid_pixels(&state, &mut matrix);
++                            }
+                         }
+                         (None, _) => {}
+                     }
+@@ -618,9 +629,13 @@ fn handle_sleep(
+             // Slowly decrease brightness
+             if dyn_sleep_mode(state) == SleepMode::Fading {
+                 let mut brightness = state.brightness;
++                // pixeled: a tenth of the brightness per step rather than a
++                // fixed 5, so the fade takes ~1s at any brightness. At 255 a
++                // step of 5 held the firmware loop in here for 5 seconds.
++                let step = (brightness / 10).max(1);
+                 loop {
+                     delay.delay_ms(100);
+-                    brightness = if brightness <= 5 { 0 } else { brightness - 5 };
++                    brightness = brightness.saturating_sub(step);
+                     set_brightness(state, brightness, matrix);
+                     if brightness == 0 {
+                         break;
+@@ -658,16 +673,22 @@ fn handle_sleep(
+             if !debug_mode(state) {
+                 led_enable.set_high().unwrap();
+             }
++            // pixeled: the LED controller was in hardware shutdown; make sure
++            // it comes back at the global current it was set to.
++            matrix.set_global_current(state.global_current).unwrap();
+ 
+             // Slowly increase brightness
+             if dyn_sleep_mode(state) == SleepMode::Fading {
+                 let mut brightness = 0;
++                // pixeled: ~1s at any brightness, as on the way down. Also no
++                // longer underflows when the brightness is below the step.
++                let step = (old_brightness / 10).max(1);
+                 loop {
+                     delay.delay_ms(100);
+-                    brightness = if brightness >= old_brightness - 5 {
++                    brightness = if brightness >= old_brightness.saturating_sub(step) {
+                         old_brightness
+                     } else {
+-                        brightness + 5
++                        brightness + step
+                     };
+                     set_brightness(state, brightness, matrix);
+                     if brightness == old_brightness {
