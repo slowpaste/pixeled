@@ -73,19 +73,25 @@ class BeamngOverlay:
     SLIDE_TIME = 0.25
     MAX_DT = 0.25
 
-    def __init__(self, width, height, app_match='beamng', state_file=None,
+    def __init__(self, width, height, app_match='beamng',
+                 title_prefix='beamng.drive', state_file=None,
                  config_file=None, scroll_speed=24.0):
         """
-        :param app_match: matched against the focused window's WM class, its
-            instance and its title, lowercased, as a substring. A class of
-            BeamNG.drive.x64 and a title of BeamNG.drive both carry it, and
-            nothing else on a desktop does.
+        :param app_match: matched against the focused window's WM class and
+            its instance, lowercased, as a substring. A class of
+            BeamNG.drive.x64 carries it, and nothing else on a desktop does.
+        :param title_prefix: what the focused window's title has to begin
+            with, lowercased, to count as the game when its class does not
+            say so. Only the beginning: a title is whatever the window is
+            showing, and a terminal, a browser tab or an editor with the
+            game's name somewhere in it is not the game.
         :param state_file: where the GNOME extension reports the focus.
         :param config_file: the layout the dashboard's settings are read from.
         """
         self.width = width
         self.height = height
         self.app_match = app_match.lower()
+        self.title_prefix = title_prefix.lower()
         self._state_file = state_file or self.DEFAULT_STATE_FILE
         self._config_file = config_file or self.DEFAULT_CONFIG
 
@@ -155,8 +161,10 @@ class BeamngOverlay:
         except (OSError, ValueError):
             return self._focused
         was = self._focused
-        self._focused = any(self.app_match in str(data.get(key, '')).lower()
-                            for key in ('app', 'instance', 'title'))
+        self._focused = (
+            any(self.app_match in str(data.get(key, '')).lower()
+                for key in ('app', 'instance'))
+            or str(data.get('title', '')).lower().startswith(self.title_prefix))
         if self._focused != was:
             logging.info("BeamngOverlay: %s focused",
                          data.get('app') or 'nothing' if not self._focused
