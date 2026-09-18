@@ -43,11 +43,26 @@ incidents and is the visualizer the rest of the time. Without an API key in
 the visualizer - which is what most people want. `setup.sh` asks for a key, and
 skipping it is fine.
 
-`config.json.beamng` replaces the whole panel with a car dashboard while BeamNG
-is running, fed by OutGauge over UDP on localhost:8888. Switching OutSim on as
+`config.json.beamng` holds the settings for the driving dashboard, which takes
+the whole panel while BeamNG has the keyboard - not merely while it is running,
+since a game behind a browser is not being driven. It is fed by OutGauge over
+UDP on localhost:8888. Switching OutSim on as
 well, on 4444, lets the dash lean into corners: OutGauge carries no lateral
 acceleration, and OutSim's yaw rate is where that comes from. Both switches are
 in Options > Other > Protocols.
+
+## What covers what
+
+Four things can have the panel, and each slides in over the one below rather
+than cutting to it, taking the top row at a word boundary so words already
+going past finish:
+
+    the overview      over everything, while it is open
+    the dashboard     while BeamNG has the keyboard
+    the artwork       while something is playing: the cover, and the visualizer
+    the gauges        config.json, the rest of the time
+
+Over all of them are the ripples from the headphone jack and the charger.
 
 ## Commands
 

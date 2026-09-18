@@ -15,6 +15,12 @@ const STATE_DIR = GLib.build_filenamev([GLib.get_user_cache_dir(), 'pixeled']);
 const STATE_FILE = GLib.build_filenamev([STATE_DIR, 'workspaces']);
 const ARTWORK_FILE = GLib.build_filenamev([STATE_DIR, 'artwork']);
 const OVERVIEW_FILE = GLib.build_filenamev([STATE_DIR, 'overview']);
+// What has the keyboard. The panel puts a full-screen layout of its own up for
+// some apps - the driving dashboard for BeamNG - and an app that is merely
+// running is not one you are looking at, so it needs to know which is focused.
+// The WM class rather than the title: a title changes with what the app is
+// doing, a class does not.
+const FOCUS_FILE = GLib.build_filenamev([STATE_DIR, 'focus']);
 // The panel's brightness, 0 to 1, as the quick settings slider has it. A
 // preference rather than shell state, so it lives in ~/.config and survives the
 // cache being cleared; pixeled.service reads it from the same home directory.
@@ -97,6 +103,11 @@ export default class PixeledWorkspacesExtension extends Extension {
                 () => this._setOverviewVisible(false)),
         ];
 
+        this._focusLast = null;
+        this._displayIds = [
+            global.display.connect('notify::focus-window', () => this._publishFocus()),
+        ];
+
         // A private copy of the shell's shared workspace adjustment. Its value
         // is the view's position in workspaces - fractional while a swipe or a
         // switch animation is under way - which is what lets the panel follow
@@ -163,6 +174,10 @@ export default class PixeledWorkspacesExtension extends Extension {
             Main.overview.disconnect(id);
         this._overviewIds = null;
 
+        for (const id of this._displayIds ?? [])
+            global.display.disconnect(id);
+        this._displayIds = null;
+
         this._adjustment?.disconnect(this._adjustmentId);
         this._adjustment = null;
         if (this._stateAdjustmentId)
@@ -194,12 +209,36 @@ export default class PixeledWorkspacesExtension extends Extension {
         // the overview over its gauges once we are gone.
         this._write(ARTWORK_FILE, JSON.stringify({}));
         this._write(OVERVIEW_FILE, JSON.stringify({visible: false}));
+        // Nothing focused, so nothing of the panel's stands aside for an app
+        // that is no longer being reported.
+        this._write(FOCUS_FILE, JSON.stringify({app: '', instance: '', title: '',
+                                                fullscreen: false}));
         this._overviewLast = null;
     }
 
     _publishAll() {
         this._publishWorkspaces();
         this._publishOverview();
+        this._publishFocus();
+    }
+
+    // ── Focus ────────────────────────────────────────────────────────────────
+    _publishFocus() {
+        const win = global.display.focus_window;
+        // Fullscreen is carried as well as the class: it is the difference
+        // between a game being played and a game sitting in a window behind
+        // something else, and the panel may want to tell them apart.
+        const state = win ? {
+            app: (win.get_wm_class() ?? '').toLowerCase(),
+            instance: (win.get_wm_class_instance() ?? '').toLowerCase(),
+            title: win.get_title() ?? '',
+            fullscreen: !!win.is_fullscreen(),
+        } : {app: '', instance: '', title: '', fullscreen: false};
+        const payload = JSON.stringify(state);
+        if (payload === this._focusLast)
+            return;
+        this._focusLast = payload;
+        this._write(FOCUS_FILE, payload);
     }
 
     _publishWorkspaces() {
