@@ -18,11 +18,11 @@ class MeteringUtility:
             scaled_value = (value - self.min_value) / (self.max_value - self.min_value) * self.num_pixels
             full_pixels = int(scaled_value)
             fractional_pixel = scaled_value - full_pixels
-            
+
             for i in range(full_pixels):
                 if i < width:  # Ensure we do not exceed the width
                     image[row][i] = 255  # Use 255 for a fully lit pixel (white in grayscale)
-            
+
             if full_pixels < width:
                 brightness = int(fractional_pixel * 255)
                 image[row][full_pixels] = brightness

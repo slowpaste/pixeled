@@ -1,29 +1,13 @@
 [
   {
-    "module": "TachometerModule",
-    "height": 9,
+    "module": "BeamngDashModule",
     "position": 0,
-    "max_rpm": 8000
-  },
-  {
-    "module": "SpeedometerModule",
-    "height": 9,
-    "position": 6,
-    "max_speed": 50
-  },
-  {
-    "module": "GearShifterModule",
-    "height": 5,
-    "position": 16
-  },
-  {
-    "module": "FuelGaugeModule",
-    "height": 2,
-    "position": 23
-  },
-  {
-    "module": "ThrottleBrakeClutchModule",
-    "height": 6,
-    "position": 28
+    "height": 34,
+    "max_speed": 55.0,
+    "redline_floor": 4500.0,
+    "shift_fraction": 0.92,
+    "shift_speed": 30.0,
+    "neutral_return": 0.8,
+    "flash_hz": 8.0
   }
 ]

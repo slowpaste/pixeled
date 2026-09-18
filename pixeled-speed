@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
-# Set how fast the ticker text scrolls, in pixels per second.
-#
-# Only affects black/white mode. Greyscale advances exactly one pixel per
-# refresh (~5.9 px/s) and is deliberately not tunable - at 6fps that is already
-# the smoothest it can be, and anything faster would skip pixels.
+# Set how fast scrolling text moves, in pixels per second: the ticker, the
+# overview's window titles, and the music player's track title.
 #
 # The running service polls this file about once a second, so no restart and no
 # root are needed - /opt/pixeled is owned by the login user.
@@ -75,4 +72,4 @@ case "${1:-status}" in
 esac
 
 printf '%s\n' "$new" > "$SPEED_FILE"
-echo "scroll speed: $new px/s (applies within 1s, black/white mode only)"
+echo "scroll speed: $new px/s (applies within 1s)"

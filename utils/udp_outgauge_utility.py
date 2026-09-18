@@ -3,6 +3,7 @@
 import socket
 import struct
 import threading
+import time
 
 class OutGaugeReader:
     """
@@ -42,7 +43,13 @@ class OutGaugeReader:
             "throttle": 0.0,
             "brake": 0.0,
             "clutch": 0.0,
-            "id": 0
+            "id": 0,
+            # time.monotonic() when the last packet landed, or None if none ever
+            # has. Consumers need to know the difference between "the car is
+            # stopped" and "nothing is sending", and no field in the packet
+            # itself answers that: the game is free to leave time_ms at zero,
+            # and every other field reads as a legitimate value at rest.
+            "received_at": None
         }
 
         self._lock = threading.Lock()
@@ -141,6 +148,7 @@ class OutGaugeReader:
             self._data["brake"]       = brake
             self._data["clutch"]      = clutch
             self._data["id"]          = id_optional
+            self._data["received_at"] = time.monotonic()
 
     def get_data(self):
         """

@@ -14,8 +14,8 @@ class PrecomputedNoise(ModuleBase):
         self.noise = PerlinNoise(octaves=5, seed=42)
         self.noise_image = self.generate_cylindrical_noise_texture(self.high_res_width, self.high_res_height, scale=1.5)
         # Scroll rate in display pixels per SECOND, not per frame. The panel runs
-        # at ~5.9fps in greyscale but ~50fps in black/white, so a per-frame step
-        # would scroll ~8x faster in one mode than the other. Sub-pixel offsets
+        # at ~6fps on stock firmware but ~60fps on the patched build, so a
+        # per-frame step would scroll 10x faster on one than the other. Sub-pixel offsets
         # blend between adjacent texture columns, so slow motion still reads as
         # continuous rather than stepping a whole pixel at a time.
         self.scroll_speed = scroll_speed
@@ -106,7 +106,7 @@ class PrecomputedNoise(ModuleBase):
             self.target_brightness_factor = 0.5  # Half brightness
 
         # Elapsed wall time since the last frame. Clamped so a stall (startup,
-        # config reload, mode switch) can't jump the scroll a long way.
+        # config reload) can't jump the scroll a long way.
         now = time.monotonic()
         dt = 0.0 if self._last_render is None else min(now - self._last_render, 0.25)
         self._last_render = now

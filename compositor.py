@@ -1,63 +1,35 @@
+import time
+
 from PIL import Image
 
 class Compositor:
-    def __init__(self, width, height, config, mode=None):
+    def __init__(self, width, height, config):
         self.width = width
         self.height = height
         self.modules = []
         self.config = config
-        self.mode = mode
         self.layout = None  # Store the layout after the initial placement
+        self.pulled = set()  # modules the overview carries up as it rises
+        self.costs = []      # (seconds, name) each module took, last frame
 
-    def add_module(self, module, position=None, modes=None):
+    def add_module(self, module, position=None, pull=False):
         if not hasattr(module, 'height') or module.height is None:
             raise ValueError(f"Module {module.__class__.__name__} must have a valid height attribute")
-        self.modules.append((module, position, modes))
-        self._tell_mode(module)
-
-    def _tell_mode(self, module):
-        """Let a module adapt to the display mode, if it cares.
-
-        Frame rate differs by roughly 8x between modes, so a module animating
-        per refresh rather than per second needs to know which one is running.
-        """
-        setter = getattr(module, 'set_mode', None)
-        if callable(setter):
-            setter(self.mode)
-
-    def set_mode(self, mode):
-        """Choose which display mode's layout to draw.
-
-        Modules are built once and kept, so switching modes only changes which
-        of them get laid out - rebuilding instead would restart the transit
-        module's fetch threads on every toggle.
-        """
-        if mode != self.mode:
-            self.mode = mode
-            self.layout = None  # force a relayout on the next render
-            for module, _, _ in self.modules:
-                self._tell_mode(module)
+        self.modules.append((module, position))
+        if pull:
+            self.pulled.add(module)
 
     def set_scroll_speed(self, px_per_second):
         """Push a runtime scroll speed to every module that accepts one."""
-        for module, _, _ in self.modules:
+        for module, _ in self.modules:
             setter = getattr(module, 'set_scroll_speed', None)
             if callable(setter):
                 setter(px_per_second)
 
-    def active_modules(self):
-        """Modules that apply to the current mode.
-
-        A module with no 'modes' list is drawn in every mode; otherwise it is
-        drawn only in the modes it names.
-        """
-        return [(module, position) for module, position, modes in self.modules
-                if not modes or self.mode is None or self.mode in modes]
-
     def calculate_layout(self):
         positions = {}
         unspecified_modules = []
-        for module, position in self.active_modules():
+        for module, position in self.modules:
             if position is not None:
                 positions[position] = module
             else:
@@ -137,12 +109,39 @@ class Compositor:
             if self.layout is None:
                 raise ValueError("Insufficient space to place all modules")
 
+    def pulled_rows(self):
+        """(top, height) of each laid-out module the overview pulls with it."""
+        self.initialize_layout()
+        return [(y_offset, module.height) for module, y_offset in self.layout
+                if module in self.pulled]
+
+    def ticker(self):
+        """The module scrolling text along the top row, if it can share it.
+
+        The overview's title goes in the same place, and takes the line over
+        from this module rather than cutting across it.
+        """
+        self.initialize_layout()
+        for module, y_offset in self.layout:
+            if (y_offset == 0 and callable(getattr(module, 'hand_over', None))
+                    and callable(getattr(module, 'take_back', None))):
+                return module
+        return None
+
     def render(self):
         self.initialize_layout()
 
         final_image = Image.new('L', (self.width, self.height), 0)
+        # What each module cost, for main.py to name the slow one when a frame
+        # overruns. Two clock reads a module a frame is nothing beside drawing
+        # one, and a gauge that waits on something is otherwise very hard to
+        # tell apart from the panel being slow.
+        self.costs = []
         for module, y_offset in self.layout:
+            started = time.monotonic()
             module_image = module.render(self.width)
+            self.costs.append((time.monotonic() - started,
+                               module.__class__.__name__))
             if not isinstance(module_image, Image.Image):
                 raise ValueError(f"Module {module.__class__.__name__} did not return a PIL Image")
             if module_image.size != (self.width, module.height):
@@ -150,3 +149,10 @@ class Compositor:
             final_image.paste(module_image, (0, y_offset))
 
         return final_image
+
+    def slowest(self):
+        """The module that took longest last frame, as "Name 12ms"."""
+        if not self.costs:
+            return 'nothing'
+        seconds, name = max(self.costs)
+        return f'{name} {1000 * seconds:.0f}ms'

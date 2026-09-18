@@ -1,14 +1,43 @@
-from modules.module_base import ModuleBase
-from utils.metering_utility import MeteringUtility
+import time
+
+import numpy as np
 from PIL import Image
 
+from modules.module_base import ModuleBase
+from utils.metering_utility import MeteringUtility
+
+
 class CpuUsageModule(ModuleBase):
-    def __init__(self, height=1):
+    """CPU load as bar meters, one row per group of hardware threads.
+
+    Every lit pixel afterglows: when the load that lit it drops away, it fades
+    out instead of going dark on the next frame, the way a phosphor does. A
+    spike lasting a single sample would otherwise be on the panel for 50ms and
+    gone, too short to notice. With the glow it holds long enough to register
+    and still clears in well under half a second, so the meter keeps reading
+    as the load now rather than as a peak-hold of the load recently. Rising is
+    never slowed: a pixel always shows at least what the current sample asks
+    for.
+
+    Load is sampled on its own cadence rather than every frame. /proc/stat
+    counts in 10ms ticks, so a thread measured over one 16ms frame can only be
+    0, 50 or 100% busy - the meter would flicker between those. Twenty times a
+    second gives each thread five ticks to be measured in, and the glow is
+    still animated at the panel's full frame rate in between.
+    """
+
+    def __init__(self, height=1, sample_interval=0.05, glow_half_life=0.08):
         super().__init__(height)  # CPU usage module height
         self.metering_utility = MeteringUtility(min_value=0, max_value=100, num_pixels=9, height=height)
         self.previous_idle = []
         self.previous_total = []
         self.num_cores = self.get_num_cores()
+        self.sample_interval = sample_interval   # seconds between /proc/stat reads
+        self.glow_half_life = glow_half_life     # seconds for an unlit pixel to halve
+        self._sampled_at = None
+        self._levels = None     # the meter as last sampled, float brightness
+        self._glow = None       # what is on the panel, decaying toward _levels
+        self._last_render = None
 
     def get_num_cores(self):
         with open('/proc/stat', 'r') as f:
@@ -25,7 +54,7 @@ class CpuUsageModule(ModuleBase):
 
         current_idle = []
         current_total = []
-        
+
         for line in lines:
             if line.startswith('cpu '):
                 continue  # Skip the aggregate line
@@ -59,12 +88,13 @@ class CpuUsageModule(ModuleBase):
 
         return usage_per_thread
 
-    def render(self, width):
+    def _meter(self, width):
+        """The meter for a fresh sample, as float brightness."""
         usage_per_thread = self.get_cpu_usage_per_thread()
         num_threads = len(usage_per_thread)
         base_threads_per_pixel = num_threads // self.height
         extra_threads = num_threads % self.height
-        
+
         pixel_usages = []
         start_index = 0
 
@@ -75,9 +105,24 @@ class CpuUsageModule(ModuleBase):
             pixel_usages.append(average_usage)
             start_index = end_index
 
-        metering_image = self.metering_utility.render(width, pixel_usages)
-        image = Image.new('L', (width, self.height), 0)
-        for y in range(self.height):
-            for x in range(width):
-                image.putpixel((x, y), metering_image[y][x])
-        return image
+        return np.array(self.metering_utility.render(width, pixel_usages), dtype=np.float64)
+
+    def render(self, width):
+        now = time.monotonic()
+        if (self._sampled_at is None
+                or not 0.0 <= now - self._sampled_at < self.sample_interval):
+            self._sampled_at = now
+            self._levels = self._meter(width)
+
+        # Clamped like the other animations, so a stall fades the glow out
+        # rather than holding it, and a clock stepping back holds for a frame.
+        dt = 0.0 if self._last_render is None else min(max(now - self._last_render, 0.0), 0.25)
+        self._last_render = now
+
+        if self._glow is None or self._glow.shape != self._levels.shape:
+            self._glow = self._levels.copy()
+        else:
+            fade = 0.5 ** (dt / self.glow_half_life)
+            self._glow = np.maximum(self._levels, self._glow * fade)
+
+        return Image.fromarray(np.rint(self._glow).astype(np.uint8), 'L')
