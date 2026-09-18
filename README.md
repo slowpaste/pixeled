@@ -46,10 +46,12 @@ skipping it is fine.
 `config.json.beamng` holds the settings for the driving dashboard, which takes
 the whole panel while BeamNG has the keyboard - not merely while it is running,
 since a game behind a browser is not being driven. It is fed by OutGauge over
-UDP on localhost:8888. Switching OutSim on as
-well, on 4444, lets the dash lean into corners: OutGauge carries no lateral
-acceleration, and OutSim's yaw rate is where that comes from. Both switches are
-in Options > Other > Protocols.
+UDP on localhost:8888. Switching MotionSim ("Motion Simulator") on as well,
+on 4444, lets the dash move with the car: it slides away from the car's
+acceleration in all three directions, tips with its roll, pitch and yaw, and
+ripples from the edge a collision came in from. OutGauge alone carries only the
+speed, so without MotionSim the dash just slides along the car. Both switches
+are in Options > Other > Protocols.
 
 ## What covers what
 
