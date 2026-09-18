@@ -8,8 +8,9 @@ import {QuickSlider} from 'resource:///org/gnome/shell/ui/quickSettings.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
 // ~/.cache rather than $XDG_RUNTIME_DIR: pixeled.service runs as a system unit
-// with User=ecca, so it gets no XDG_RUNTIME_DIR of its own, and /run/user/1000
-// does not exist yet if the service starts at boot before anyone logs in.
+// under the login user, so it gets no XDG_RUNTIME_DIR of its own, and that
+// user's /run/user/UID does not exist yet if the service starts at boot
+// before anyone has logged in.
 const STATE_DIR = GLib.build_filenamev([GLib.get_user_cache_dir(), 'pixeled']);
 const STATE_FILE = GLib.build_filenamev([STATE_DIR, 'workspaces']);
 const ARTWORK_FILE = GLib.build_filenamev([STATE_DIR, 'artwork']);
