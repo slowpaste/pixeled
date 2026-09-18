@@ -118,8 +118,14 @@ class Ripple:
         self._carry = 0.0
         self.active = False
 
-    def strike(self):
-        """The plug going in. Adds to whatever is still rippling."""
+    def strike(self, at=None):
+        """The plug going in. Adds to whatever is still rippling.
+
+        `at` moves where it goes in first, as (x, y) in the same terms as the
+        jack's: something hitting the panel from wherever it was hit."""
+        if at is not None:
+            s = self.SCALE
+            self._jack = (at[0] * s - 0.5, at[1] * s - 0.5)
         self._shape()
         self._driven = 0.0
         self.active = True
