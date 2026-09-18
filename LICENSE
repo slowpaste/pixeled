@@ -1,0 +1,27 @@
+            DO WHAT THE FUCK YOU WANT TO PUBLIC LICENSE
+                    Version 2, December 2004
+
+ Copyright (C) 2026 patate
+
+ Everyone is permitted to copy and distribute verbatim or modified
+ copies of this license document, and changing it is allowed as long
+ as the name is changed.
+
+            DO WHAT THE FUCK YOU WANT TO PUBLIC LICENSE
+   TERMS AND CONDITIONS FOR COPYING, DISTRIBUTION AND MODIFICATION
+
+  0. You just DO WHAT THE FUCK YOU WANT TO.
+
+--------------------------------------------------------------------
+
+Scope, which is not part of the license above:
+
+This covers pixeled's own files. It does not cover the LED matrix
+firmware derived from FrameworkComputer/inputmodule-rs -
+
+    firmware/ledmatrix-0.2.0-official.uf2
+    firmware/ledmatrix-0.2.0-pixeled.uf2
+    firmware/ledmatrix-pixeled.patch
+
+- which are MIT licensed, Copyright (c) 2023 Framework Computer Inc.
+That license is in firmware/LICENSE and stays with those files.

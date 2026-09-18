@@ -51,5 +51,5 @@ The two `.uf2` files and `ledmatrix-pixeled.patch` are derived from
 which is MIT licensed, Copyright (c) 2023 Framework Computer Inc. That license
 is in `LICENSE` here and covers those three files.
 
-`flash-ledmatrix.sh` and `bench-ledmatrix.py` are pixeled's own and share
-whatever the rest of this repository is under.
+`flash-ledmatrix.sh` and `bench-ledmatrix.py` are pixeled's own, under the
+WTFPL like the rest of the repository - see `LICENSE` at the top level.
