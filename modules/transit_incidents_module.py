@@ -6,10 +6,30 @@ from utils.sound_visualizer import sound_visualizer
 from utils.ticker_line import TickerLine
 from utils.tiny_font import sanitize_tiny_text, tiny_text_width
 import math
+import os
 import requests
 import time
 import threading
 import socket
+
+# The WMATA key is deliberately not in config.json, which is in the repository.
+# It is one line in ~/.config/pixeled/wmata-key - the same home directory the
+# GNOME extension writes its files to, which pixeled.service reads as its own
+# user - and WMATA_API_KEY overrides that, for running by hand.
+KEY_FILE = os.path.expanduser('~/.config/pixeled/wmata-key')
+
+
+def read_api_key():
+    """The key, or None if there is not one to be had."""
+    key = os.environ.get('WMATA_API_KEY', '').strip()
+    if key:
+        return key
+    try:
+        with open(KEY_FILE) as f:
+            return f.read().strip() or None
+    except OSError:
+        return None
+
 
 class TransitIncidentsModule(ModuleBase):
     """WMATA bus incidents, said when they are new and then left alone.
@@ -32,8 +52,8 @@ class TransitIncidentsModule(ModuleBase):
     FLASH_LIT = 0.35        # fraction of it at full brightness
     FLASH_FADE = 0.3        # fraction of it fading out after that
 
-    def __init__(self, api_key, scroll_speed=24.0):
-        self.api_key = api_key
+    def __init__(self, api_key=None, scroll_speed=24.0):
+        self.api_key = api_key or read_api_key()
         self.height = 5
         # Pixels per SECOND, so the rate holds whatever the panel's frame rate.
         # A judgement call about real LEDs, not about the maths: text that
@@ -90,6 +110,9 @@ class TransitIncidentsModule(ModuleBase):
             self._news.append(new)
 
     def fetch_incidents_with_retries(self, retries=5, delay=10):
+        if not self.api_key:
+            print(f'No WMATA key in {KEY_FILE}; not fetching incidents.')
+            return
         for attempt in range(retries):
             if not self.is_online():
                 print("No internet connection. Retrying...")
